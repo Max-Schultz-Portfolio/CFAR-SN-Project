@@ -1,0 +1,204 @@
+---
+title: "h_act_mrg Incorporation"
+author: "Max Schultz"
+date: "2026-04-01"
+output: pdf_document
+---
+
+#### Preliminaries
+```{r echo = T, results = "hide", message = F, warnings = F}
+library(tidyr) # data cleaning processing 
+library(dplyr) # further data manipulation (%>% (pipe) operator)
+library(igraph) # social networks 
+library(RColorBrewer) # color palettes 
+library(stringr) # regex 
+library(purrr) # used to create the network objects 
+```
+
+
+
+#### Loading the data
+
+```{r}
+library(haven)
+data <- read_dta("CFAR SN 22FEB2026.dta") # new data <- cleaned 
+head(data)
+names(data)
+```
+
+
+#### Creating the network 
+```{r}
+# Network Creation 
+network <- function(data, type = c("basic", "intra_household")){
+  type <- match.arg(type)
+  
+  # data columns needed to build the graphs 
+  index <- data$record_id
+  hh <- data$hh_id_unified_
+  
+  # base attributes 
+  ego_basic <- data %>%
+    transmute(from = record_id, to = contact_id) %>%
+    filter(!is.na(from), !is.na(to), from != to)
+  
+  
+  # basic multi-ego network
+  if (type == "basic"){ 
+    edges <- ego_basic
+  }
+  
+  if (type == "intra_household" && "hh_id_unified_" %in% names(data) && any(!is.na(hh))) {
+    
+    hh_edges <- data %>%
+      dplyr::filter(!is.na(hh_id_unified_), !is.na(contact_id)) %>%
+      dplyr::group_by(record_id, hh_id_unified_) %>%
+      dplyr::summarise(
+        pairs = list({
+          u <- unique(contact_id)
+          if (length(u) < 2) {
+            tibble::tibble(from = character(0), to = character(0))
+          } else {
+            m <- t(combn(u, 2))
+            tibble::tibble(from = m[, 1], to = m[, 2])
+          }
+        }),
+        .groups = "drop"
+      ) %>%
+      tidyr::unnest(pairs)
+    
+    edges <- dplyr::bind_rows(ego_basic, hh_edges) %>% dplyr::distinct()
+  }
+  
+  edges <- edges %>%
+    mutate(a = pmin(from, to), b = pmax(from,to))%>% # I am mapping edges to form undirected unique edges 
+    distinct(a,b) %>%
+    transmute(from = a, to = b)
+  
+  graph = graph_from_data_frame(edges, directed = FALSE)
+  egos <- unique(as.character(index))
+  V(graph)$type <- ifelse(V(graph)$name %in% egos, "index", "contact")
+  V(graph)$size <- ifelse(V(graph)$type == "index", 3, 2) # this is just a sizing convention i've found works well with the plots 
+  return(graph)
+}
+```
+
+
+
+#### Color palette for the variables
+```{r}
+alpha = 0.5
+
+global_code = list(
+  alpha = alpha, 
+  contact_age_levels = 1:10,
+  contact_age_labels = c("0-2y","3-5y","7-11y","12-15y","16-20y","21-30y","31-40y","41-50y","51-60y",">60y"),
+  palettes = list( # all colors can be changed according to needs. See base R colors here: https://www.datanovia.com/en/blog/awesome-list-of-657-r-color-names/
+      basic_network = c(index = "red", contact = "lightblue"),
+      contact_age_network = setNames(RColorBrewer::brewer.pal(10, "Spectral"),
+        c("0-2y", "3-5y", "7-11y", "12-15y", "16-20y", "21-30y", "31-40y", "41-50y", "51-60y", ">60y")),
+      igra_network = c("2" = "red", "1" = "purple", "0" = "black"),
+      hiv_network = c("2" = "red", "1" = "purple"),
+      hh_info_network = c(lived = "indianred", stayed = "darkorange1", occas = "goldenrod1",
+              elswe = "chartreuse4", visited = "blue"),
+      hh_id_network = c(
+        "1"="brown1","2"="chocolate1","3"="yellow","4"="aquamarine3",
+        "5"="cornflowerblue","6"="darkorchid2","7"="deeppink3",
+        "NA"=rgb(0.5,0.5,0.5,alpha)),
+      hh_act_network = c("1" = "aquamarine3", "2" = "brown1", "NA" = rgb(0.5,0.5,0.5,alpha))
+  )
+)
+
+```
+
+
+
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
+source("color_schemes.r")
+basic = network(data = data, type = "basic")
+contact_age = color_schemes(graph = basic, data = data, global_code = global_code, scheme = "contact_age")
+plot.igraph(
+  contact_age$graph,
+  layout = layout_with_fr(contact_age$graph),
+  vertex.color = V(contact_age$graph)$plot_color,
+  vertex.size  = V(contact_age$graph)$size,
+  vertex.label = NA,
+  edge.color   = "gray70",
+  edge.width   = 0.5,
+  main = "Contact Age Multi-Ego Network"
+)
+legend(
+  "right",
+  legend = contact_age$legend$labels,
+  #inset = c(-.35,0),
+  col = contact_age$legend$colors,
+  pch = 19, # circle in R
+  #pt.cex = 1.2, 
+  bty = "n", 
+  cex = 1
+)
+
+```
+
+
+
+
+
+
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
+set.seed(123)
+
+intra_household <- network(data, "intra_household")
+
+age_on_intra <- color_schemes(
+  graph = intra_household,
+  data = data,
+  global_code = global_code,
+  scheme = "contact_age"
+)
+
+act_groups <- color_schemes(
+  graph = age_on_intra$graph,
+  data = data,
+  global_code = global_code,
+  scheme = "hh_act"
+)
+
+plot.igraph(
+  age_on_intra$graph,
+  layout = layout_with_fr(age_on_intra$graph),
+  vertex.color = igraph::V(age_on_intra$graph)$plot_color,
+  vertex.size  = igraph::V(age_on_intra$graph)$size,
+  vertex.label = NA,
+  edge.color   = "gray30",
+  edge.width   = 0.5,
+  mark.groups  = act_groups$groups,
+  mark.col     = act_groups$cols,
+  mark.border  = NA,
+  mark.expand  = 2,
+  main = "Contact Age + In-Household Shading (Intra-household edges)"
+)
+
+legend(
+  "topright",
+  legend = age_on_intra$legend$labels,
+  col    = age_on_intra$legend$colors,
+  pch    = 19,
+  bty    = "n",
+  cex    = 1
+)
+
+act_leg <- act_groups$legend
+keep <- !(act_leg$labels %in% c("Index", "Contact"))
+act_leg$labels <- act_leg$labels[keep]
+act_leg$colors <- act_leg$colors[keep]
+
+legend(
+  "bottomright",
+  legend = act_leg$labels,
+  col    = act_leg$colors,
+  pch    = 15,
+  bty    = "n",
+  cex    = 1
+)
+```
