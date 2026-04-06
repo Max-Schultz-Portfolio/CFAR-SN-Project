@@ -1,0 +1,489 @@
+---
+title: "CFAR Social Network Project"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+library(formatR) #
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 50), tidy = TRUE) #
+```
+**<u>PI</u>**: Dr. Jeffrey Campbell <br>
+**<u>Author</u>**: Max Schultz 
+
+# Preliminaries
+```{r echo = T, results = "hide", message = F, warnings = F}
+library(tidyr) # data cleaning processing 
+library(dplyr) # further data manipulation (%>% (pipe) operator)
+library(igraph) # social networks 
+library(RColorBrewer) # color palettes 
+library(stringr) # regex 
+library(purrr) # used to create the network objects 
+```
+
+
+# Data Loading and Cleaning
+Raw data from RedCap was given in CSV format. Reading data in and cleaning:
+
+```{r}
+df_messy = read.csv("/Users/maxschultz/Desktop/CFAR Social Network Project/CHERISHSN_DATA_2025-10-16_1847.csv") 
+```
+
+The raw RedCap data is in wide format, where each row corresponds to an index patient. Contact information is stored in these wide columns. 
+We want a row for each contact for our analysis; thus, I use the **pivot_longer()** function from the tidyr library to convert wide data into long data. The columns that are currently useful for us are the following: 
+
+**Contact-level attributes:**
+
+- contact id (primary key)
+- contact age
+- contact sex
+- contact relation to child index
+- primary caregiver 
+- household id
+- previous tb 
+- contact information (lived, stayed, visited, occasional, elsewhere only)
+- other contact information (same room, same bed)
+- contact tb symptoms (weight loss, cough)
+- contact tb risk elements (drug use, smoking)
+
+**Index-level attributes:**
+
+- index ID (not unique because of long format)
+- index age 
+- index sex
+- final IGRA result 
+- study group (CHEU vs. CHUU)
+
+Contact data was collected over time, and spans numbers 1-28. For example, household id is stored as hh_id_1cf and goes all the way to hh_id_28cf and this is the case for all contact variables.
+To mitigate this, we'll use the **pivot_longer()** function with regular expressions to capture all of these columns. 
+
+```{r}
+df_cleaned <- df_messy %>%
+    pivot_longer( # these need only be the contact-level variables
+        cols = matches(
+            "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_\\d+cf"
+          ),
+        names_to = c(".value", "ctc_idx"),
+        names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_(\\d+)cf(?:___1)?$",
+        values_drop_na = FALSE
+    ) %>% # end pivot longer scope
+    mutate( # creating contact_id as pervious forms have used contact x from index y; i.e. ctc_x_idx_y
+    ctc_idx = as.integer(ctc_idx),
+    contact_id = str_c("ctc_", record_id, "_idx_", ctc_idx)
+    ) %>%
+    filter(!( # failsafe filtering just in case the regular expression is picky 
+        is.na(snml_sex) & 
+        is.na(snml_vage) & 
+        is.na(snml_relate) & 
+        is.na(hh_id))) %>%
+    arrange(record_id, ctc_idx) %>%
+    transmute( # renaming and addressing data types 
+    record_id = as.character(record_id),
+    contact_id = as.character(contact_id),
+    enrol_age_mrg = as.numeric(enrol_age),
+    enrol_age_yrs_mrg = as.integer(floor(enrol_age_mrg/365.25)),
+    cherish_sn_study_group_mrg = factor(cherish_sn_study_group),
+    final_igra_results = factor(igra_results_cfar_complete),
+    snml_vage_mrg = as.numeric(snml_vage),
+    snml_sex_mrg = factor(snml_sex),
+    snml_relate_mrg = factor(snml_relate),
+    hh_id_unified_ = factor(hh_id),      
+    pcare_mrg = factor(pcare),
+    smoke_mrg = factor(smoke),
+    drug_mrg = factor(drug),
+    tb_dx_mrg = factor(tb_dx),
+    lived_mrg = factor(lived),
+    stayed_mrg = factor(stayed),
+    visited_mrg = factor(visited),
+    occas_mrg = factor(occas),
+    elswe_mrg = factor(elswe),
+    room_mrg = factor(room),
+    bed_mrg = factor(bed),
+  )
+head(df_cleaned)
+names(df_cleaned)
+```
+
+This is a large code chunk, but essentially what I did was remove the various sparse columns and truncate them into one row per contact. 
+
+# Social Network Plots: Helper Functions 
+We will be using two different types of social network plots in our analysis: a multi-ego network, and a multi-ego network with added edges corresponding to a shared household.
+Let's build these graph objects using **igraph**. 
+```{r}
+network <- function(data, type = c("basic", "intra_household")){
+    type <- match.arg(type)
+
+    # data columns needed to build the graphs 
+    index <- data$record_id
+    hh <- data$hh_id_unified_
+
+    # base attributes 
+    ego_basic <- data %>%
+      transmute(from = record_id, to = contact_id) %>%
+      filter(!is.na(from), !is.na(to), from != to)
+
+
+    # basic multi-ego network
+    if (type == "basic"){ 
+        edges <- ego_basic
+    }
+
+
+    # multi-ego network with intra household edges 
+    # if (type == "intra_household" && "hh_id_unified_" %in% names(data) && any(!is.na(hh))) {
+    #     hh_edges <- data %>%
+    #         filter(!is.na(hh), !is.na(contacts)) %>% # keeping rows where both of these are not null
+    #         group_by(record_id, hh_id_unified_) %>%  # and further stratifying by index and household (this is our ego level information for our graphs)
+    #         summarise(
+    #           pairs = list({ # this is just a matrix of all the unordered edges depending on what is in the group by clause
+    #             u = unique(contacts)
+    #             if (length(u)<2){
+    #               return(NULL)
+    #             } else{
+    #               m = t(combn(u,2)) # all combinations of edges for two contacts 
+    #               tibble::tibble(from = m[, 1], to = m[, 2])
+    #             }
+    #           }),
+    #           .groups = "drop" # just removing any potential groupings so its just a tibble 
+    #         ) %>%
+    #         tidyr::unnest(pairs) %>% # converting to cols in the df 
+
+    #     edges <- bind_rows(ego_basic, hh_edges) %>% distinct() # now this adds the information from the original graph back into this one and removes any duplicates
+    # }
+    if (type == "intra_household" && "hh_id_unified_" %in% names(data) && any(!is.na(hh))) {
+
+      hh_edges <- data %>%
+        dplyr::filter(!is.na(hh_id_unified_), !is.na(contact_id)) %>%
+        dplyr::group_by(record_id, hh_id_unified_) %>%
+        dplyr::summarise(
+          pairs = list({
+            u <- unique(contact_id)
+            if (length(u) < 2) {
+              tibble::tibble(from = character(0), to = character(0))
+            } else {
+              m <- t(combn(u, 2))
+              tibble::tibble(from = m[, 1], to = m[, 2])
+            }
+          }),
+          .groups = "drop"
+        ) %>%
+        tidyr::unnest(pairs)
+
+      edges <- dplyr::bind_rows(ego_basic, hh_edges) %>% dplyr::distinct()
+    }
+
+    edges <- edges %>%
+        mutate(a = pmin(from, to), b = pmax(from,to))%>% # I am mapping edges to form undirected unique edges 
+        distinct(a,b) %>%
+        transmute(from = a, to = b)
+
+    graph = graph_from_data_frame(edges, directed = FALSE)
+    egos <- unique(as.character(index))
+    V(graph)$type <- ifelse(V(graph)$name %in% egos, "index", "contact")
+    V(graph)$size <- ifelse(V(graph)$type == "index", 3, 2) # this is just a sizing convention i've found works well with the plots 
+    return(graph)
+}
+```
+
+Now that the graph objects have been made, lets create some graph and coloring conventions for the different plots we want.
+
+```{r}
+alpha = 0.5
+
+global_code = list(
+  alpha = alpha, 
+  contact_age_levels = 1:10,
+  contact_age_labels = c("0-2y","3-5y","7-11y","12-15y","16-20y","21-30y","31-40y","41-50y","51-60y",">60y"),
+  palettes = list( # all colors can be changed according to needs. See base R colors here: https://www.datanovia.com/en/blog/awesome-list-of-657-r-color-names/
+      basic_network = c(index = "red", contact = "lightblue"),
+      contact_age_network = setNames(RColorBrewer::brewer.pal(10, "Spectral"),
+        c("0-2y", "3-5y", "7-11y", "12-15y", "16-20y", "21-30y", "31-40y", "41-50y", "51-60y", ">60y")),
+      igra_network = c("2" = "red", "1" = "purple", "0" = "black"),
+      hiv_network = c("2" = "red", "1" = "purple"),
+      hh_info_network = c(lived = "indianred", stayed = "darkorange1", occas = "goldenrod1",
+              elswe = "chartreuse4", visited = "blue"),
+      hh_id_network = c(
+        "1"="brown1","2"="chocolate1","3"="yellow","4"="aquamarine3",
+        "5"="cornflowerblue","6"="darkorchid2","7"="deeppink3",
+        "NA"=rgb(0.5,0.5,0.5,alpha))
+  )
+)
+
+```
+
+Now we can apply those schemes for each type of network. Check out the "color_schemes.R" file containing the full mapping code. After sourcing the file, we can instantiate a social network like so:
+
+```{r}
+source("/Users/maxschultz/Desktop/color_schemes.r")
+```
+
+## Basic Multi-Ego Network 
+
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
+set.seed(123)
+basic = network(data = df_cleaned, type = "basic")
+basic_graph = color_schemes(graph = basic, data = df_cleaned, global_code = global_code, scheme = "basic")
+plot.igraph(
+  basic_graph$graph,
+  layout = layout_with_fr(basic_graph$graph),
+  vertex.color = V(basic_graph$graph)$plot_color,
+  vertex.size  = V(basic_graph$graph)$size,
+  vertex.label = NA,
+  edge.color   = "gray70",
+  edge.width   = 0.5,
+  main = "Basic Multi-Ego Network")
+legend(
+  "right",
+  legend = basic_graph$legend$labels,
+  #inset = c(-.35,0),
+  col = basic_graph$legend$colors,
+  pch = 19, # circle in R
+  #pt.cex = 1.2, 
+  bty = "n", 
+  cex = 1
+)
+```
+
+
+## Contact Age Network 
+
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
+set.seed(123)
+contact_age = color_schemes(graph = basic, data = df_cleaned, global_code = global_code, scheme = "contact_age")
+plot.igraph(
+  contact_age$graph,
+  layout = layout_with_fr(contact_age$graph),
+  vertex.color = V(contact_age$graph)$plot_color,
+  vertex.size  = V(contact_age$graph)$size,
+  vertex.label = NA,
+  edge.color   = "gray70",
+  edge.width   = 0.5,
+  main = "Contact Age Multi-Ego Network"
+)
+legend(
+  "right",
+  legend = contact_age$legend$labels,
+  #inset = c(-.35,0),
+  col = contact_age$legend$colors,
+  pch = 19, # circle in R
+  #pt.cex = 1.2, 
+  bty = "n", 
+  cex = 1
+)
+```
+
+## Index HIV and Contact Age Network (Combined)
+This next plot is rather interesting, because the way we have defined these structures allows us to stitch two schemes together... with the exception of the legends.  
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
+set.seed(123)
+
+# network definitions
+index_hiv = color_schemes(graph = basic, data = df_cleaned, global_code = global_code, scheme = "hiv_exposure") # Index HIV network 
+contact_age_scheme = color_schemes(graph = basic, data = df_cleaned, global_code = global_code, scheme = "contact_age") # Contact Age Network 
+graph_hiv = index_hiv$graph # just the graph 
+contact_age_palette = global_code$palettes$contact_age_network
+label_by_level = setNames(global_code$contact_age_labels, global_code$contact_age_levels) # age mapping 
+
+# you can use the legends provided and override, or just create a new legend.. whatever is easiest 
+# overriding 
+contact_age = df_cleaned$snml_vage_mrg
+names(contact_age) = df_cleaned$contact_id # contact age lookup table 
+contacts = which(V(graph_hiv)$type == "contact") 
+level = contact_age[V(graph_hiv)$name[contacts]] # nodes that are contacts 
+ok = !is.na(level)
+V(graph_hiv)$plot_color[contacts[ok]] <- unname(contact_age_palette[label_by_level[as.character(level[ok])]]) # mapping colors to non-null contact age
+V(graph_hiv)$plot_color[contacts[!ok]] <- "white" 
+
+plot.igraph(
+  graph_hiv,
+  layout = layout_with_fr(graph_hiv),
+  vertex.color = V(graph_hiv)$plot_color,
+  vertex.size  = V(graph_hiv)$size,
+  vertex.label = NA,
+  edge.color   = "gray70",
+  edge.width   = 0.5,
+  main = "Contact Age & Index HIV Multi-Ego Network"
+)
+
+legend(
+  "topright",
+  legend = contact_age_scheme$legend$labels,
+  #inset = c(-.35,0),
+  col = contact_age_scheme$legend$colors,
+  pch = 19, # circle in R
+  #pt.cex = 1.2, 
+  bty = "n", 
+  cex = 1
+)
+hiv_leg <- index_hiv$legend
+keep <- grepl("^Index", hiv_leg$labels) # keeping only index HIV entries
+hiv_leg$labels <- hiv_leg$labels[keep]
+hiv_leg$colors <- hiv_leg$colors[keep]
+legend(
+  "right",
+  legend = hiv_leg$labels,
+  col    = hiv_leg$colors,
+  pch    = 19,
+  bty    = "n",
+  cex    = 1
+)
+```
+
+
+## Household ID Shading - Multi-Ego Network with Intra-Household Connections
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
+set.seed(123)
+
+intra_household <- network(df_cleaned, "intra_household") # graph initialization 
+
+age_on_intra <- color_schemes(graph = intra_household, data = df_cleaned, global_code = global_code, scheme = "contact_age") # contact age
+
+hh_groups <- color_schemes(graph = age_on_intra$graph, data = df_cleaned, global_code = global_code, scheme = "hh_id") # hh_id on same graph as above
+
+plot.igraph(
+  age_on_intra$graph,
+  layout = layout_with_fr(age_on_intra$graph),
+  vertex.color = igraph::V(age_on_intra$graph)$plot_color,
+  vertex.size  = igraph::V(age_on_intra$graph)$size,
+  vertex.label = NA,
+  edge.color   = "gray30",
+  edge.width   = 0.5,
+  mark.groups  = hh_groups$groups,
+  mark.col     = hh_groups$cols,     # <-- cols, not colors
+  mark.border  = NA,
+  mark.expand  = 5,
+  main = "Contact Age + HH Shading (Intra-household edges)"
+)
+
+legend(
+  "topright",
+  legend = age_on_intra$legend$labels,
+  col    = age_on_intra$legend$colors,
+  pch    = 19,
+  bty    = "n",
+  cex    = 1
+)
+hh_leg <- hh_groups$legend
+keep <- !(hh_leg$labels %in% c("Index", "Contact"))
+hh_leg$labels <- hh_leg$labels[keep]
+hh_leg$colors <- hh_leg$colors[keep]
+
+legend(
+  "right",
+  legend = hh_leg$labels,
+  col    = hh_leg$colors,
+  pch    = 15,
+  bty    = "n",
+  cex    = 1
+)
+```
+
+## Household Information Network 
+
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
+set.seed(123)
+hh_info = color_schemes(data = df_cleaned, global_code = global_code, graph = intra_household, scheme = "household_info")
+plot.igraph(
+  hh_info$graph,
+  layout = layout_with_fr(hh_info$graph),
+  vertex.color = igraph::V(age_on_intra$graph)$plot_color,
+  vertex.size  = igraph::V(age_on_intra$graph)$size,
+  vertex.label = NA,
+  edge.color   = "gray30",
+  edge.width   = 0.5,
+)
+legend(
+  "right",
+  legend = hh_info$legend$labels,
+  col = hh_info$legend$colors,
+  pch = 19,
+  bty = "n",
+  cex = 1
+)
+```
+
+# Intra-Household Age Network with Shading for HH information
+
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
+set.seed(123)
+age_on_intra <- color_schemes(graph = intra_household, data = df_cleaned, global_code = global_code, scheme = "contact_age") # contact age
+
+hh_groups <- color_schemes(graph = age_on_intra$graph, data = df_cleaned, global_code = global_code, scheme = "household_info_shading") # hh_id on same graph as above
+
+plot.igraph(
+  age_on_intra$graph,
+  layout = layout_with_fr(age_on_intra$graph),
+  vertex.color = igraph::V(age_on_intra$graph)$plot_color,
+  vertex.size  = igraph::V(age_on_intra$graph)$size,
+  vertex.label = NA,
+  edge.color   = "gray30",
+  edge.width   = 0.5,
+  mark.groups  = hh_groups$groups,
+  mark.col     = hh_groups$cols,     # <-- cols, not colors
+  mark.border  = NA,
+  mark.expand  = 5,
+  main = "Contact Age + HH Info. Shading (Intra-household edges)"
+)
+
+legend(
+  "topright",
+  legend = age_on_intra$legend$labels,
+  col    = age_on_intra$legend$colors,
+  pch    = 19,
+  bty    = "n",
+  cex    = 1
+)
+
+# Example of how to just create a new legend 
+
+legend(
+  "right",
+  legend = c("Lived", "Stayed", "Occas.", "Elswe.", "Visited"),
+  col = c("indianred", "darkorange1", "goldenrod1", "chartreuse4", "blue"),
+  pch = 15, 
+  bty = "n",
+  cex = 1
+)
+
+```
+
+
+
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
+set.seed(123)
+hh_info = color_schemes(data = df_cleaned, global_code = global_code, graph = intra_household, scheme = "household_info")
+hh_groups <- color_schemes(graph = hh_info$graph, data = df_cleaned, global_code = global_code, scheme = "hh_id")
+plot.igraph(
+  hh_info$graph,
+  layout = layout_with_fr(hh_info$graph),
+  vertex.color = igraph::V(hh_info$graph)$plot_color,
+  vertex.size  = igraph::V(hh_info$graph)$size,
+  vertex.label = NA,
+  edge.color   = "gray30",
+  edge.width   = 0.5,
+  mark.groups  = hh_groups$groups,
+  mark.col     = hh_groups$cols,     # <-- cols, not colors
+  mark.border  = NA,
+  mark.expand  = 5,
+  main = "Time Interacting (Nodes) and HH ID (Shading)"
+)
+legend(
+  "right",
+  legend = hh_info$legend$labels,
+  col = hh_info$legend$colors,
+  pch = 19,
+  bty = "n",
+  cex = 1
+)
+hh_leg <- hh_groups$legend
+keep <- !(hh_leg$labels %in% c("Index", "Contact"))
+hh_leg$labels <- hh_leg$labels[keep]
+hh_leg$colors <- hh_leg$colors[keep]
+
+legend(
+  "topright",
+  legend = hh_leg$labels,
+  col    = hh_leg$colors,
+  pch    = 15,
+  bty    = "n",
+  cex    = 1
+)
+```
