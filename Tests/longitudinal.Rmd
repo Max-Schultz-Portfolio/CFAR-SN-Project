@@ -1,0 +1,188 @@
+---
+title: "Longitudinal Test"
+output: html_document
+---
+
+# Longitudinal test for CFAR Social Networks
+
+Check-ins are at 6/12/18/24mo periods
+
+### Preliminaries 
+
+```{r echo = T, results = "hide", message = F, warnings = F}
+library(tidyr) # data cleaning processing 
+library(dplyr) # further data manipulation (%>% (pipe) operator)
+library(igraph) # social networks 
+library(RColorBrewer) # color palettes 
+library(stringr) # regex 
+library(purrr) # used to create the network objects 
+```
+
+
+### Data Preparation
+
+We want to be able to stratify by age at enrollment, HEU/HUU, and both together 
+
+- We will then repeat analysis (metrics) at eat time component 
+- But first, we will focus on visualization 
+- Already have proven that the set.seed() function allows the algorithm to deterministically keep the clusters in the same positions in Igraph plots
+- The cleanest way to do this is just to create new datasets at each timepoint and plot from those... to avoid double counting
+
+```{r}
+raw_data <- read.csv("/Users/maxschultz/CFAR-SN-Project/Datasets/CHERISHSN_DATA_2026-03-24_1747(in).csv")
+# head(raw_data)
+
+unique(raw_data$cfar_tb_v_timepoint) # 1 = 0m, 2 = 6mo, 3 = 12mo, 4 = 18mo, 5 = 24mo, NA 
+unique(raw_data$snml_v_timepoint_)
+```
+
+
+
+```{r}
+df_cleaned <- raw_data %>%
+  mutate(
+    timepoint = case_when(
+      redcap_event_name == "delivery_arm_3" ~ "0m",
+      redcap_event_name == "6_month_arm_3" ~ "6m",
+      redcap_event_name == "12_month_arm_3" ~ "12m",
+      redcap_event_name == "18_month_k23c2_arm_4" ~ "18m",
+      redcap_event_name == "24_month_k23c2_arm_4" ~ "24m",
+      redcap_event_name == "12_month_k23c2_arm_4" ~ "12m",
+      TRUE ~ NA_character_
+    ),
+    timepoint = factor(timepoint, levels = c("0m", "6m", "12m", "18m", "24m"))
+  ) %>%
+  pivot_longer(
+    cols = matches(
+      "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_\\d+cf"
+    ),
+    names_to = c(".value", "ctc_idx"),
+    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_(\\d+)cf(?:___1)?$",
+    values_drop_na = FALSE
+  ) %>%
+  mutate(
+    ctc_idx = as.integer(ctc_idx),
+    contact_visit_id = str_c("ctc_", record_id, "_tp_", timepoint, "_idx_", ctc_idx)
+  ) %>%
+  filter(
+    !is.na(timepoint),
+    !(is.na(snml_sex) & is.na(snml_vage) & is.na(snml_relate) & is.na(hh_id))
+  ) %>%
+  transmute(
+    record_id = as.character(record_id),
+    contact_visit_id,
+    timepoint,
+    enrol_age_mrg = as.numeric(enrol_age),
+    enrol_age_yrs_mrg = as.integer(floor(enrol_age_mrg / 365.25)),
+    cherish_sn_study_group_mrg = factor(cherish_sn_study_group),
+    final_igra_results = factor(igra_results_cfar_complete),
+    snml_vage_mrg = as.numeric(snml_vage),
+    snml_sex_mrg = factor(snml_sex),
+    snml_relate_mrg = factor(snml_relate),
+    hh_id_unified_ = factor(hh_id),
+    pcare_mrg = factor(pcare),
+    smoke_mrg = factor(smoke),
+    drug_mrg = factor(drug),
+    tb_dx_mrg = factor(tb_dx),
+    lived_mrg = factor(lived),
+    stayed_mrg = factor(stayed),
+    visited_mrg = factor(visited),
+    occas_mrg = factor(occas),
+    elswe_mrg = factor(elswe),
+    room_mrg = factor(room),
+    bed_mrg = factor(bed)
+  )
+
+head(df_cleaned)
+
+```
+
+
+```{r}
+raw_data %>%
+  mutate(
+    has_contact_cf = !(is.na(snml_sex_1cf) & is.na(snml_vage_1cf) & is.na(snml_relate_1cf) & is.na(hh_id_1cf))
+  ) %>%
+  count(redcap_event_name, has_contact_cf)
+
+
+
+raw_data %>%
+  mutate(
+    has_contact_noncf = !(is.na(snml_sex_1) & is.na(snml_vage_1) & is.na(snml_relate_1) & is.na(hh_id_1))
+  ) %>%
+  count(redcap_event_name, has_contact_noncf)
+```
+
+
+
+
+```{r}
+raw_data %>%
+  mutate(
+    timepoint = case_when(
+      cfar_tb_v_timepoint == 1 ~ "0m",
+      cfar_tb_v_timepoint == 2 ~ "6m",
+      cfar_tb_v_timepoint == 3 ~ "12m",
+      cfar_tb_v_timepoint == 4 ~ "18m",
+      cfar_tb_v_timepoint == 5 ~ "24m",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  count(timepoint)
+```
+
+
+
+
+
+```{r}
+step1 <- raw_data %>%
+  mutate(
+    timepoint = case_when(
+      cfar_tb_v_timepoint == 1 ~ "0m",
+      cfar_tb_v_timepoint == 2 ~ "6m",
+      cfar_tb_v_timepoint == 3 ~ "12m",
+      cfar_tb_v_timepoint == 4 ~ "18m",
+      cfar_tb_v_timepoint == 5 ~ "24m",
+      TRUE ~ NA_character_
+    )
+  )
+
+unique(step1$timepoint)
+```
+
+
+
+```{r}
+step2 <- step1 %>%
+  pivot_longer(
+    cols = matches("^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_\\d+cf"),
+    names_to = c(".value", "ctc_idx"),
+    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_(\\d+)cf(?:___1)?$",
+    values_drop_na = FALSE
+  )
+
+unique(step2$timepoint)
+table(step2$timepoint, useNA = "ifany")
+```
+
+
+
+```{r}
+raw_data$redcap_event_name
+```
+q
+
+
+
+
+
+
+
+
+
+
+
+
+
