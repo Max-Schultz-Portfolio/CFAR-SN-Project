@@ -1,5 +1,5 @@
 ---
-title: "Longitudinal Test"
+title: "Longitudinal Dataset Creation"
 output: html_document
 ---
 
@@ -30,34 +30,71 @@ We want to be able to stratify by age at enrollment, HEU/HUU, and both together
 
 ```{r}
 raw_data <- read.csv("/Users/maxschultz/CFAR-SN-Project/Datasets/CHERISHSN_DATA_2026-03-24_1747(in).csv")
-# head(raw_data)
-
-unique(raw_data$cfar_tb_v_timepoint) # 1 = 0m, 2 = 6mo, 3 = 12mo, 4 = 18mo, 5 = 24mo, NA 
-unique(raw_data$snml_v_timepoint_)
+#head(raw_data)
 ```
 
+treat each arm as its own timepoint, delivery_arm_3 is enrolled at delivery and the prefix for the rest delineates the chek-in time. cfar_arm_1 are people who were enrolled in the cross-sectional portion only (n=15) but if they have a csn_k_id then they are part of the longitudinal analysis and timepoint is cfar_v_timepoint_c - information is later under their k ids 
 
+
+delete all cfars lol -- This was the final determination in the last meeting with Dr. Campbell
+
+15 in total deleting from the longitudinal - this was actually determined to be 30 
 
 ```{r}
-df_cleaned <- raw_data %>%
+# number of cfars deleting from the data
+length(unique(raw_data$record_id[which(raw_data$redcap_event_name == "cfar_arm_1")]))
+```
+
+So there are actually 30 unique index patients who are being 'removed' from the longitudinal analysis.
+
+Unfortunately, index-level data is stored in cfar_arm_1 so we will need to calculate them separately and then merge the two datasets. 
+
+Here is the code for just the contact-level data population for the longitudinal analysis. 
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+
+# ============================================================
+# CONTACT-LEVEL LONGITUDINAL SOCIAL NETWORK DATASET ONLY
+# ============================================================
+
+# -----------------------------
+# 1. Base longitudinal rows
+# -----------------------------
+
+base_long <- raw_data %>%
+  filter(redcap_event_name != "cfar_arm_1") %>%
   mutate(
+    record_id = as.character(record_id),
     timepoint = case_when(
       redcap_event_name == "delivery_arm_3" ~ "0m",
       redcap_event_name == "6_month_arm_3" ~ "6m",
       redcap_event_name == "12_month_arm_3" ~ "12m",
+      redcap_event_name == "12_month_k23c2_arm_4" ~ "12m",
       redcap_event_name == "18_month_k23c2_arm_4" ~ "18m",
       redcap_event_name == "24_month_k23c2_arm_4" ~ "24m",
-      redcap_event_name == "12_month_k23c2_arm_4" ~ "12m",
       TRUE ~ NA_character_
-    ),
-    timepoint = factor(timepoint, levels = c("0m", "6m", "12m", "18m", "24m"))
+    )
   ) %>%
+  filter(!is.na(timepoint))
+
+
+# -----------------------------
+# 2. Basic contact variables
+# -----------------------------
+# These are stored as:
+# snml_sex_1, snml_vage_1, snml_relate_1, hh_id_1, etc.
+
+basic_contacts <- base_long %>%
   pivot_longer(
     cols = matches(
-      "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_\\d+cf"
+      "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_\\d+$"
     ),
     names_to = c(".value", "ctc_idx"),
-    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_(\\d+)cf(?:___1)?$",
+    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_(\\d+)$",
     values_drop_na = FALSE
   ) %>%
   mutate(
@@ -65,114 +102,197 @@ df_cleaned <- raw_data %>%
     contact_visit_id = str_c("ctc_", record_id, "_tp_", timepoint, "_idx_", ctc_idx)
   ) %>%
   filter(
-    !is.na(timepoint),
     !(is.na(snml_sex) & is.na(snml_vage) & is.na(snml_relate) & is.na(hh_id))
   ) %>%
   transmute(
     record_id = as.character(record_id),
+    ctc_idx = as.integer(ctc_idx),
     contact_visit_id,
-    timepoint,
-    enrol_age_mrg = as.numeric(enrol_age),
-    enrol_age_yrs_mrg = as.integer(floor(enrol_age_mrg / 365.25)),
-    cherish_sn_study_group_mrg = factor(cherish_sn_study_group),
-    final_igra_results = factor(igra_results_cfar_complete),
+    timepoint = as.character(timepoint),
+
     snml_vage_mrg = as.numeric(snml_vage),
     snml_sex_mrg = factor(snml_sex),
     snml_relate_mrg = factor(snml_relate),
     hh_id_unified_ = factor(hh_id),
+
     pcare_mrg = factor(pcare),
     smoke_mrg = factor(smoke),
     drug_mrg = factor(drug),
     tb_dx_mrg = factor(tb_dx),
-    lived_mrg = factor(lived),
-    stayed_mrg = factor(stayed),
-    visited_mrg = factor(visited),
-    occas_mrg = factor(occas),
-    elswe_mrg = factor(elswe),
     room_mrg = factor(room),
     bed_mrg = factor(bed)
   )
 
-head(df_cleaned)
 
-```
+# -----------------------------
+# 3. Helper function for exposure variables
+# -----------------------------
+# These are checkbox variables stored as:
+# 0m:  lived_1___1
+# 6m:  lived_1_6m___1
+# 12m: lived_1_12m___1
+# 18m: lived_1_18m___1
+# 24m: lived_1_24m___1
 
-
-```{r}
-raw_data %>%
-  mutate(
-    has_contact_cf = !(is.na(snml_sex_1cf) & is.na(snml_vage_1cf) & is.na(snml_relate_1cf) & is.na(hh_id_1cf))
-  ) %>%
-  count(redcap_event_name, has_contact_cf)
-
-
-
-raw_data %>%
-  mutate(
-    has_contact_noncf = !(is.na(snml_sex_1) & is.na(snml_vage_1) & is.na(snml_relate_1) & is.na(hh_id_1))
-  ) %>%
-  count(redcap_event_name, has_contact_noncf)
-```
-
-
-
-
-```{r}
-raw_data %>%
-  mutate(
-    timepoint = case_when(
-      cfar_tb_v_timepoint == 1 ~ "0m",
-      cfar_tb_v_timepoint == 2 ~ "6m",
-      cfar_tb_v_timepoint == 3 ~ "12m",
-      cfar_tb_v_timepoint == 4 ~ "18m",
-      cfar_tb_v_timepoint == 5 ~ "24m",
-      TRUE ~ NA_character_
+make_exposure <- function(data, tp, suffix_pattern, names_pattern) {
+  data %>%
+    filter(timepoint == tp) %>%
+    pivot_longer(
+      cols = matches(suffix_pattern),
+      names_to = c(".value", "ctc_idx"),
+      names_pattern = names_pattern,
+      values_drop_na = FALSE
+    ) %>%
+    mutate(
+      record_id = as.character(record_id),
+      ctc_idx = as.integer(ctc_idx),
+      timepoint = as.character(tp)
+    ) %>%
+    transmute(
+      record_id,
+      ctc_idx,
+      timepoint,
+      lived_mrg = as.integer(lived),
+      stayed_mrg = as.integer(stayed),
+      visited_mrg = as.integer(visited),
+      occas_mrg = as.integer(occas),
+      elswe_mrg = as.integer(elswe)
     )
+}
+
+
+# -----------------------------
+# 4. Exposure contact variables
+# -----------------------------
+
+exposure_contacts <- bind_rows(
+  make_exposure(
+    base_long,
+    tp = "0m",
+    suffix_pattern = "^(lived|stayed|visited|occas|elswe)_\\d+___1$",
+    names_pattern = "^(lived|stayed|visited|occas|elswe)_(\\d+)___1$"
+  ),
+  make_exposure(
+    base_long,
+    tp = "6m",
+    suffix_pattern = "^(lived|stayed|visited|occas|elswe)_\\d+_6m___1$",
+    names_pattern = "^(lived|stayed|visited|occas|elswe)_(\\d+)_6m___1$"
+  ),
+  make_exposure(
+    base_long,
+    tp = "12m",
+    suffix_pattern = "^(lived|stayed|visited|occas|elswe)_\\d+_12m___1$",
+    names_pattern = "^(lived|stayed|visited|occas|elswe)_(\\d+)_12m___1$"
+  ),
+  make_exposure(
+    base_long,
+    tp = "18m",
+    suffix_pattern = "^(lived|stayed|visited|occas|elswe)_\\d+_18m___1$",
+    names_pattern = "^(lived|stayed|visited|occas|elswe)_(\\d+)_18m___1$"
+  ),
+  make_exposure(
+    base_long,
+    tp = "24m",
+    suffix_pattern = "^(lived|stayed|visited|occas|elswe)_\\d+_24m___1$",
+    names_pattern = "^(lived|stayed|visited|occas|elswe)_(\\d+)_24m___1$"
+  )
+) %>%
+  mutate(
+    record_id = as.character(record_id),
+    ctc_idx = as.integer(ctc_idx),
+    timepoint = as.character(timepoint)
+  )
+
+
+# -----------------------------
+# 5. Final contact-level dataset
+# -----------------------------
+
+df_contacts <- basic_contacts %>%
+  left_join(
+    exposure_contacts,
+    by = c("record_id", "ctc_idx", "timepoint")
   ) %>%
+  mutate(
+    timepoint = factor(timepoint, levels = c("0m", "6m", "12m", "18m", "24m"))
+  ) %>%
+  select(
+    record_id,
+    contact_visit_id,
+    timepoint,
+
+    snml_vage_mrg,
+    snml_sex_mrg,
+    snml_relate_mrg,
+    hh_id_unified_,
+
+    pcare_mrg,
+    smoke_mrg,
+    drug_mrg,
+    tb_dx_mrg,
+
+    lived_mrg,
+    stayed_mrg,
+    visited_mrg,
+    occas_mrg,
+    elswe_mrg,
+
+    room_mrg,
+    bed_mrg
+  )
+
+
+# -----------------------------
+# 6. Benchmark checks
+# -----------------------------
+
+df_contacts %>%
+  summarise(
+    n_rows = n(),
+    n_index_cases = n_distinct(record_id),
+    missing_contact_age = sum(is.na(snml_vage_mrg)),
+    missing_contact_sex = sum(is.na(snml_sex_mrg)),
+    missing_contact_relationship = sum(is.na(snml_relate_mrg)),
+    missing_household_id = sum(is.na(hh_id_unified_)),
+    missing_lived = sum(is.na(lived_mrg)),
+    missing_stayed = sum(is.na(stayed_mrg)),
+    missing_visited = sum(is.na(visited_mrg)),
+    missing_occas = sum(is.na(occas_mrg)),
+    missing_elswe = sum(is.na(elswe_mrg))
+  )
+
+df_contacts %>%
   count(timepoint)
+
+df_contacts %>%
+  count(timepoint, lived_mrg)
+
+df_contacts %>%
+  count(timepoint, stayed_mrg)
+
+df_contacts %>%
+  count(timepoint, visited_mrg)
+
+df_contacts %>%
+  count(timepoint, occas_mrg)
+
+df_contacts %>%
+  count(timepoint, elswe_mrg)
+head(df_contacts, 20)
 ```
 
+Up until here the dataset is populated with contact-level information. Now we have to focus on index-level attributes. To make it easier, we will just create a smaller dataset with the following specific attributes and then merge: 
+
+- enrol_age: enrollment age
+- cherish_sn_study_group: HUU/HEU status 
+- final_igra_result
+- etc. 
 
 
 
 
-```{r}
-step1 <- raw_data %>%
-  mutate(
-    timepoint = case_when(
-      cfar_tb_v_timepoint == 1 ~ "0m",
-      cfar_tb_v_timepoint == 2 ~ "6m",
-      cfar_tb_v_timepoint == 3 ~ "12m",
-      cfar_tb_v_timepoint == 4 ~ "18m",
-      cfar_tb_v_timepoint == 5 ~ "24m",
-      TRUE ~ NA_character_
-    )
-  )
-
-unique(step1$timepoint)
-```
 
 
-
-```{r}
-step2 <- step1 %>%
-  pivot_longer(
-    cols = matches("^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_\\d+cf"),
-    names_to = c(".value", "ctc_idx"),
-    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|lived|stayed|visited|occas|elswe|room|bed|smoke|drug)_(\\d+)cf(?:___1)?$",
-    values_drop_na = FALSE
-  )
-
-unique(step2$timepoint)
-table(step2$timepoint, useNA = "ifany")
-```
-
-
-
-```{r}
-raw_data$redcap_event_name
-```
-q
 
 
 
