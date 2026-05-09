@@ -43,6 +43,7 @@ delete all cfars lol -- This was the final determination in the last meeting wit
 ```{r}
 # number of cfars deleting from the data
 length(unique(raw_data$record_id[which(raw_data$redcap_event_name == "cfar_arm_1")]))
+raw_data$igra
 ```
 
 So there are actually 30 unique index patients who are being 'removed' from the longitudinal analysis.
@@ -50,6 +51,8 @@ So there are actually 30 unique index patients who are being 'removed' from the 
 Unfortunately, index-level data is stored in cfar_arm_1 so we will need to calculate them separately and then merge the two datasets. 
 
 Here is the code for just the contact-level data population for the longitudinal analysis. 
+
+### Contact Longitudinal Dataset Creation 
 
 ```{r}
 library(dplyr)
@@ -65,6 +68,7 @@ library(purrr)
 # 1. Base longitudinal rows
 # -----------------------------
 
+# this is base long dataset with every variable 
 base_long <- raw_data %>%
   filter(redcap_event_name != "cfar_arm_1") %>%
   mutate(
@@ -88,6 +92,8 @@ base_long <- raw_data %>%
 # These are stored as:
 # snml_sex_1, snml_vage_1, snml_relate_1, hh_id_1, etc.
 
+# this is slightly more cleaned with it only keeping contact_level variables available 
+
 basic_contacts <- base_long %>%
   pivot_longer(
     cols = matches(
@@ -99,7 +105,7 @@ basic_contacts <- base_long %>%
   ) %>%
   mutate(
     ctc_idx = as.integer(ctc_idx),
-    contact_visit_id = str_c("ctc_", record_id, "_tp_", timepoint, "_idx_", ctc_idx)
+    contact_visit_id = str_c("ctc_", ctc_idx, "_tp_", timepoint, "_idx_", record_id)
   ) %>%
   filter(
     !(is.na(snml_sex) & is.na(snml_vage) & is.na(snml_relate) & is.na(hh_id))
@@ -134,6 +140,9 @@ basic_contacts <- base_long %>%
 # 18m: lived_1_18m___1
 # 24m: lived_1_24m___1
 
+# we now need to create exposure variables: lived, stayed, visited, occas, elswe,
+# they are stored in different formats 
+
 make_exposure <- function(data, tp, suffix_pattern, names_pattern) {
   data %>%
     filter(timepoint == tp) %>%
@@ -164,6 +173,8 @@ make_exposure <- function(data, tp, suffix_pattern, names_pattern) {
 # -----------------------------
 # 4. Exposure contact variables
 # -----------------------------
+
+# exposure_contacts is a reshaped lookup table for the lived/stayed/visited/occas/elswe checkbox variables. It is not meant to be interpreted as the number of real contacts because it includes all 28 possible REDCap contact slots.
 
 exposure_contacts <- bind_rows(
   make_exposure(
@@ -285,19 +296,39 @@ Up until here the dataset is populated with contact-level information. Now we ha
 
 - enrol_age: enrollment age
 - cherish_sn_study_group: HUU/HEU status 
-- final_igra_result
 - etc. 
 
 
+```{r}
+length(unique(raw_data$record_id)) # full raw data 
+length(unique(base_long$record_id)) # raw long data without cfar_arm_1
+length(unique(basic_contacts$record_id)) # pivoted contact variables where at least one of the variables (lived, stayed, visited, occas., etc. are present) -> so there are technically only 30 usable index cases??
+length(unique(df_contacts$record_id))
+```
+
+
+### Index Longitudinal Dataset Creation 
+
+```{r}
+raw_data %>%
+  group_by(redcap_event_name) %>%
+  summarise(
+    n_rows = n(),
+    enrol_age_nonmissing = sum(!is.na(enrol_age)),
+    study_group_nonmissing = sum(!is.na(cherish_sn_study_group)),
+    .groups = "drop"
+  )
+```
+
+
+Okay, so this confirms that index-level attributes are only contained within the cfar_arm_1 event so we cant merge them... ignoring this for now. 
+
+
+### Pre-plot Analysis
 
 
 
-
-
-
-
-
-
+### Plotting 
 
 
 
