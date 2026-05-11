@@ -25,7 +25,7 @@ We want to be able to stratify by age at enrollment, HEU/HUU, and both together
 
 - We will then repeat analysis (metrics) at eat time component 
 - But first, we will focus on visualization 
-- Already have proven that the set.seed() function allows the algorithm to deterministically keep the clusters in the same positions in Igraph plots
+- Already have proven that the set.seed() function allows the algorithm to deterministically keep the clusters in the same positions in Igraph plots per-timepoint... Though there is no algorithmic guarantee that these will stay the same across timepoints
 - The cleanest way to do this is just to create new datasets at each timepoint and plot from those... to avoid double counting
 
 ```{r}
@@ -43,12 +43,9 @@ delete all cfars lol -- This was the final determination in the last meeting wit
 ```{r}
 # number of cfars deleting from the data
 length(unique(raw_data$record_id[which(raw_data$redcap_event_name == "cfar_arm_1")]))
-raw_data$igra
 ```
 
 So there are actually 30 unique index patients who are being 'removed' from the longitudinal analysis.
-
-Unfortunately, index-level data is stored in cfar_arm_1 so we will need to calculate them separately and then merge the two datasets. 
 
 Here is the code for just the contact-level data population for the longitudinal analysis. 
 
@@ -60,15 +57,8 @@ library(tidyr)
 library(stringr)
 library(purrr)
 
-# ============================================================
-# CONTACT-LEVEL LONGITUDINAL SOCIAL NETWORK DATASET ONLY
-# ============================================================
 
-# -----------------------------
-# 1. Base longitudinal rows
-# -----------------------------
-
-# this is base long dataset with every variable 
+# this is the raw long data without cfar_arm_1 and created timepoints
 base_long <- raw_data %>%
   filter(redcap_event_name != "cfar_arm_1") %>%
   mutate(
@@ -86,53 +76,93 @@ base_long <- raw_data %>%
   filter(!is.na(timepoint))
 
 
-# -----------------------------
-# 2. Basic contact variables
-# -----------------------------
-# These are stored as:
-# snml_sex_1, snml_vage_1, snml_relate_1, hh_id_1, etc.
 
-# this is slightly more cleaned with it only keeping contact_level variables available 
+# Contact variables are stored as:
+# 0m:  snml_sex_1, snml_vage_1, snml_relate_1, hh_id_1
+# 6m:  snml_sex_1_6m, snml_vage_1_6m, snml_relate_1_6m, hh_id_1_6m
+# 12m: snml_sex_1_12m, etc.
+# 18m: snml_sex_1_18m, etc.
+# 24m: snml_sex_1_24m, etc.
 
-basic_contacts <- base_long %>%
-  pivot_longer(
-    cols = matches(
-      "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_\\d+$"
-    ),
-    names_to = c(".value", "ctc_idx"),
-    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_(\\d+)$",
-    values_drop_na = FALSE
-  ) %>%
-  mutate(
-    ctc_idx = as.integer(ctc_idx),
-    contact_visit_id = str_c("ctc_", ctc_idx, "_tp_", timepoint, "_idx_", record_id)
-  ) %>%
-  filter(
-    !(is.na(snml_sex) & is.na(snml_vage) & is.na(snml_relate) & is.na(hh_id))
-  ) %>%
-  transmute(
-    record_id = as.character(record_id),
-    ctc_idx = as.integer(ctc_idx),
-    contact_visit_id,
-    timepoint = as.character(timepoint),
+# helper function to deal with the regex 
+make_basic_contacts <- function(data, tp, suffix_pattern, names_pattern) {
+  data %>%
+    filter(timepoint == tp) %>%
+    pivot_longer(
+      cols = matches(suffix_pattern),
+      names_to = c(".value", "ctc_idx"),
+      names_pattern = names_pattern,
+      values_drop_na = FALSE
+    ) %>%
+    mutate(
+      record_id = as.character(record_id),
+      ctc_idx = as.integer(ctc_idx),
+      timepoint = as.character(tp),
+      contact_visit_id = str_c("ctc_", ctc_idx, "_tp_", timepoint, "_idx_", record_id)
+    ) %>%
+    filter(
+      !is.na(snml_sex) |
+        !is.na(snml_vage) |
+        !is.na(snml_relate) |
+        !is.na(hh_id)
+    ) %>%
+    transmute(
+      record_id,
+      ctc_idx,
+      contact_visit_id,
+      timepoint,
 
-    snml_vage_mrg = as.numeric(snml_vage),
-    snml_sex_mrg = factor(snml_sex),
-    snml_relate_mrg = factor(snml_relate),
-    hh_id_unified_ = factor(hh_id),
+      snml_vage_mrg = as.numeric(snml_vage),
+      snml_sex_mrg = factor(snml_sex),
+      snml_relate_mrg = factor(snml_relate),
+      hh_id_unified_ = factor(hh_id),
 
-    pcare_mrg = factor(pcare),
-    smoke_mrg = factor(smoke),
-    drug_mrg = factor(drug),
-    tb_dx_mrg = factor(tb_dx),
-    room_mrg = factor(room),
-    bed_mrg = factor(bed)
+      pcare_mrg = if ("pcare" %in% names(.)) factor(pcare) else factor(NA),
+      smoke_mrg = if ("smoke" %in% names(.)) factor(smoke) else factor(NA),
+      drug_mrg = if ("drug" %in% names(.)) factor(drug) else factor(NA),
+      tb_dx_mrg = if ("tb_dx" %in% names(.)) factor(tb_dx) else factor(NA),
+      room_mrg = if ("room" %in% names(.)) factor(room) else factor(NA),
+      bed_mrg = if ("bed" %in% names(.)) factor(bed) else factor(NA)
+    )
+}
+
+
+# this makes the entire dataset without the exposure variables like lived, stayed, occas., etc. 
+basic_contacts <- bind_rows(
+  make_basic_contacts(
+    base_long,
+    tp = "0m",
+    suffix_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_\\d+$",
+    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_(\\d+)$"
+  ),
+  make_basic_contacts(
+    base_long,
+    tp = "6m",
+    suffix_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_\\d+_6m$",
+    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_(\\d+)_6m$"
+  ),
+  make_basic_contacts(
+    base_long,
+    tp = "12m",
+    suffix_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_\\d+_12m$",
+    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_(\\d+)_12m$"
+  ),
+  make_basic_contacts(
+    base_long,
+    tp = "18m",
+    suffix_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_\\d+_18m$",
+    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_(\\d+)_18m$"
+  ),
+  make_basic_contacts(
+    base_long,
+    tp = "24m",
+    suffix_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_\\d+_24m$",
+    names_pattern = "^(snml_sex|snml_vage|snml_relate|hh_id|pcare|tb_dx|smoke|drug|room|bed)_(\\d+)_24m$"
   )
+)
 
 
-# -----------------------------
-# 3. Helper function for exposure variables
-# -----------------------------
+
 # These are checkbox variables stored as:
 # 0m:  lived_1___1
 # 6m:  lived_1_6m___1
@@ -140,9 +170,7 @@ basic_contacts <- base_long %>%
 # 18m: lived_1_18m___1
 # 24m: lived_1_24m___1
 
-# we now need to create exposure variables: lived, stayed, visited, occas, elswe,
-# they are stored in different formats 
-
+# helper function for exposures 
 make_exposure <- function(data, tp, suffix_pattern, names_pattern) {
   data %>%
     filter(timepoint == tp) %>%
@@ -171,10 +199,11 @@ make_exposure <- function(data, tp, suffix_pattern, names_pattern) {
 
 
 # -----------------------------
-# 4. Exposure contact variables
+# 5. Exposure contact variables
 # -----------------------------
-
-# exposure_contacts is a reshaped lookup table for the lived/stayed/visited/occas/elswe checkbox variables. It is not meant to be interpreted as the number of real contacts because it includes all 28 possible REDCap contact slots.
+# exposure_contacts is a reshaped lookup table.
+# It includes all possible REDCap contact slots, so do not interpret it
+# as the number of real contacts.
 
 exposure_contacts <- bind_rows(
   make_exposure(
@@ -215,10 +244,8 @@ exposure_contacts <- bind_rows(
   )
 
 
-# -----------------------------
-# 5. Final contact-level dataset
-# -----------------------------
 
+# creating the final longitudinal dataset 
 df_contacts <- basic_contacts %>%
   left_join(
     exposure_contacts,
@@ -253,10 +280,8 @@ df_contacts <- basic_contacts %>%
   )
 
 
-# -----------------------------
-# 6. Benchmark checks
-# -----------------------------
 
+# some benchmarking checks 
 df_contacts %>%
   summarise(
     n_rows = n(),
@@ -271,6 +296,12 @@ df_contacts %>%
     missing_occas = sum(is.na(occas_mrg)),
     missing_elswe = sum(is.na(elswe_mrg))
   )
+
+base_long %>%
+  count(timepoint)
+
+basic_contacts %>%
+  count(timepoint)
 
 df_contacts %>%
   count(timepoint)
@@ -289,14 +320,9 @@ df_contacts %>%
 
 df_contacts %>%
   count(timepoint, elswe_mrg)
+
 head(df_contacts, 20)
 ```
-
-Up until here the dataset is populated with contact-level information. Now we have to focus on index-level attributes. To make it easier, we will just create a smaller dataset with the following specific attributes and then merge: 
-
-- enrol_age: enrollment age
-- cherish_sn_study_group: HUU/HEU status 
-- etc. 
 
 
 ```{r}
@@ -323,12 +349,255 @@ raw_data %>%
 
 Okay, so this confirms that index-level attributes are only contained within the cfar_arm_1 event so we cant merge them... ignoring this for now. 
 
+```{r}
+index_data <- raw_data[which(raw_data$redcap_event_name == "cfar_arm_1"),]
+setdiff(unique(index_data$record_id), unique(df_contacts$record_id)) 
+```
 
-### Pre-plot Analysis
 
+
+### Pre-plot Metric Analysis
+
+```{r}
+```
 
 
 ### Plotting 
+
+```{r}
+# Make sure columns are properly typed
+df_contacts <- df_contacts %>%
+  mutate(
+    record_id = as.character(record_id),
+    contact_visit_id = as.character(contact_visit_id),
+    timepoint = factor(as.character(timepoint), levels = c("0m", "6m", "12m", "18m", "24m")),
+    hh_id_unified_ = as.character(hh_id_unified_)
+  )
+
+
+network_timepoint <- function(data, type = c("basic", "intra_household")) {
+  type <- match.arg(type)
+  
+  # Basic ego-contact edges
+  ego_edges <- data %>%
+    transmute(
+      from = as.character(record_id),
+      to = as.character(contact_visit_id)
+    ) %>%
+    filter(
+      !is.na(from),
+      !is.na(to),
+      from != "",
+      to != "",
+      from != to
+    )
+  
+  if (nrow(ego_edges) == 0) {
+    stop("No ego-contact edges were created. Check record_id/contact_visit_id.")
+  }
+  
+  if (type == "basic") {
+    edges <- ego_edges
+  }
+  
+  if (type == "intra_household") {
+    hh_edges <- data %>%
+      filter(
+        !is.na(hh_id_unified_),
+        hh_id_unified_ != "",
+        hh_id_unified_ != "NA",
+        !is.na(contact_visit_id),
+        contact_visit_id != ""
+      ) %>%
+      group_by(record_id, hh_id_unified_) %>%
+      summarise(
+        pairs = list({
+          u <- unique(contact_visit_id)
+          
+          if (length(u) < 2) {
+            tibble::tibble(from = character(0), to = character(0))
+          } else {
+            m <- t(combn(u, 2))
+            tibble::tibble(from = m[, 1], to = m[, 2])
+          }
+        }),
+        .groups = "drop"
+      ) %>%
+      tidyr::unnest(pairs)
+    
+    edges <- bind_rows(ego_edges, hh_edges) %>%
+      distinct()
+  }
+  
+  # Make undirected edges unique
+  edges <- edges %>%
+    mutate(
+      a = pmin(from, to),
+      b = pmax(from, to)
+    ) %>%
+    distinct(a, b) %>%
+    transmute(from = a, to = b)
+  
+  graph <- graph_from_data_frame(edges, directed = FALSE)
+  
+  egos <- unique(as.character(data$record_id))
+  
+  V(graph)$type <- ifelse(V(graph)$name %in% egos, "index", "contact")
+  V(graph)$size <- ifelse(V(graph)$type == "index", 5, 3)
+  
+  graph
+}
+
+
+# Basic index/contact colors
+apply_basic_colors <- function(graph) {
+  V(graph)$plot_color <- ifelse(
+    V(graph)$type == "index",
+    "red",
+    "lightblue"
+  )
+
+  graph
+}
+
+
+# Contact age colors
+contact_age_labels <- c(
+  "0-2y", "3-5y", "7-11y", "12-15y", "16-20y",
+  "21-30y", "31-40y", "41-50y", "51-60y", ">60y"
+)
+
+contact_age_palette <- setNames(
+  RColorBrewer::brewer.pal(10, "Spectral"),
+  contact_age_labels
+)
+
+apply_contact_age_colors <- function(graph, data) {
+  
+  graph <- apply_basic_colors(graph)
+  
+  age_lookup <- data %>%
+    mutate(
+      contact_visit_id = as.character(contact_visit_id),
+      snml_vage_mrg = as.character(snml_vage_mrg)
+    ) %>%
+    distinct(contact_visit_id, snml_vage_mrg)
+  
+  age_vector <- age_lookup$snml_vage_mrg
+  names(age_vector) <- age_lookup$contact_visit_id
+  
+  contacts <- which(V(graph)$type == "contact")
+  contact_names <- V(graph)$name[contacts]
+  age_values <- age_vector[contact_names]
+  
+  age_label_lookup <- setNames(contact_age_labels, as.character(1:10))
+  age_labels <- age_label_lookup[as.character(age_values)]
+  
+  V(graph)$plot_color[contacts] <- ifelse(
+    is.na(age_labels),
+    "white",
+    unname(contact_age_palette[age_labels])
+  )
+  
+  V(graph)$plot_color[V(graph)$type == "index"] <- "red"
+  
+  graph
+}
+
+
+make_hh_groups <- function(graph, data, alpha = 0.25) {
+  
+  hh_palette <- c(
+    "1" = "brown1",
+    "2" = "chocolate1",
+    "3" = "yellow",
+    "4" = "aquamarine3",
+    "5" = "cornflowerblue",
+    "6" = "darkorchid2",
+    "7" = "deeppink3",
+    "NA" = rgb(0.5, 0.5, 0.5, alpha)
+  )
+  
+  hh_lookup <- data %>%
+    mutate(
+      contact_visit_id = as.character(contact_visit_id),
+      hh_id_unified_ = as.character(hh_id_unified_)
+    ) %>%
+    distinct(contact_visit_id, hh_id_unified_) %>%
+    filter(!is.na(hh_id_unified_), hh_id_unified_ != "")
+  
+  hh_groups_df <- hh_lookup %>%
+    group_by(hh_id_unified_) %>%
+    summarise(
+      nodes = list(contact_visit_id),
+      .groups = "drop"
+    )
+  
+  groups <- lapply(hh_groups_df$nodes, function(x) {
+    which(V(graph)$name %in% x)
+  })
+  
+  keep <- lengths(groups) >= 2
+  
+  groups <- groups[keep]
+  hh_ids <- hh_groups_df$hh_id_unified_[keep]
+  
+  cols <- hh_palette[hh_ids]
+  cols[is.na(cols)] <- rgb(0.5, 0.5, 0.5, alpha)
+  
+  list(
+    groups = groups,
+    cols = unname(cols),
+    labels = paste("Household", hh_ids),
+    colors = unname(cols)
+  )
+}
+
+
+plot_basic_by_timepoint <- function(data, tp) {
+  
+  tp_data <- data %>%
+    filter(as.character(timepoint) == tp)
+  
+  if (nrow(tp_data) == 0) {
+    message("No data for timepoint: ", tp)
+    return(NULL)
+  }
+  
+  set.seed(123)
+  
+  g <- network_timepoint(tp_data, type = "basic")
+  g <- apply_basic_colors(g)
+  
+  plot.igraph(
+    g,
+    layout = layout_with_fr(g),
+    vertex.color = V(g)$plot_color,
+    vertex.size = V(g)$size,
+    vertex.label = NA,
+    edge.color = "gray70",
+    edge.width = 0.5,
+    main = paste("Basic Ego Network -", tp)
+  )
+  
+  legend(
+    "right",
+    legend = c("Index", "Contact"),
+    col = c("red", "lightblue"),
+    pch = 19,
+    bty = "n",
+    cex = 0.9
+  )
+}
+
+
+plot_basic_by_timepoint(df_contacts, "0m")
+plot_basic_by_timepoint(df_contacts, "6m")
+plot_basic_by_timepoint(df_contacts, "12m")
+plot_basic_by_timepoint(df_contacts, "18m")
+plot_basic_by_timepoint(df_contacts, "24m")
+```
+
 
 
 
