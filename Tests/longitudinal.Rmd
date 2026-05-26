@@ -325,6 +325,8 @@ head(df_contacts, 20)
 ```
 
 
+### Some baseline checks
+
 ```{r}
 length(unique(raw_data$record_id)) # full raw data 
 length(unique(base_long$record_id)) # raw long data without cfar_arm_1
@@ -344,17 +346,57 @@ raw_data %>%
     study_group_nonmissing = sum(!is.na(cherish_sn_study_group)),
     .groups = "drop"
   )
+
+
+
+
+first_nonmissing <- function(x) {
+  x <- x[!is.na(x) & x != ""]
+  if (length(x) == 0) {
+    return(NA)
+  } else {
+    return(x[1])
+  }
+}
+
+
+# index-level attributes are appended with _k 
+index_variables <- raw_data %>%
+  mutate(record_id = as.character(record_id)) %>%
+  group_by(record_id) %>%
+  summarise(
+    enrol_age_mrg = first_nonmissing(enrol_age_k),
+    cherish_sn_study_group_mrg = first_nonmissing(cherish_sn_study_group_k),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    enrol_age_mrg = as.numeric(enrol_age_mrg),
+    enrol_age_yrs_mrg = as.integer(floor(enrol_age_mrg / 365.25)),
+
+    cherish_sn_study_group_mrg = factor(
+      cherish_sn_study_group_mrg,
+      levels = c(1, 2),
+      labels = c("CHEU", "CHUU")
+    )
+  )
+
+
+# merging index and contact data 
+df_longitudinal_cleaned <- df_contacts %>%
+  mutate(record_id = as.character(record_id)) %>%
+  left_join(index_variables, by = "record_id")
+
+
+df_longitudinal_cleaned %>%
+  summarise(
+    n_contact_rows = n(),
+    n_record_ids = n_distinct(record_id),
+    missing_enrol_age = sum(is.na(enrol_age_mrg)),
+    missing_study_group = sum(is.na(cherish_sn_study_group_mrg))
+    )
+
 ```
-
-
-Okay, so this confirms that index-level attributes are only contained within the cfar_arm_1 event so we cant merge them... ignoring this for now. 
-
-```{r}
-index_data <- raw_data[which(raw_data$redcap_event_name == "cfar_arm_1"),]
-setdiff(unique(index_data$record_id), unique(df_contacts$record_id)) 
-```
-
-
+#### Okay, data is clean and prepared for analysis!
 
 ### Pre-plot Metric Analysis
 
@@ -364,9 +406,9 @@ setdiff(unique(index_data$record_id), unique(df_contacts$record_id))
 
 ### Plotting 
 
-```{r}
+```{r, fig.width=11, fig.height=9, out.width="100%", fig.retina=2}
 # Make sure columns are properly typed
-df_contacts <- df_contacts %>%
+df_longitudinal_cleaned <- df_longitudinal_cleaned %>%
   mutate(
     record_id = as.character(record_id),
     contact_visit_id = as.character(contact_visit_id),
@@ -591,16 +633,270 @@ plot_basic_by_timepoint <- function(data, tp) {
 }
 
 
-plot_basic_by_timepoint(df_contacts, "0m")
-plot_basic_by_timepoint(df_contacts, "6m")
-plot_basic_by_timepoint(df_contacts, "12m")
-plot_basic_by_timepoint(df_contacts, "18m")
-plot_basic_by_timepoint(df_contacts, "24m")
+plot_basic_by_timepoint(df_longitudinal_cleaned, "0m")
+plot_basic_by_timepoint(df_longitudinal_cleaned, "6m")
+plot_basic_by_timepoint(df_longitudinal_cleaned, "12m")
+plot_basic_by_timepoint(df_longitudinal_cleaned, "18m")
+plot_basic_by_timepoint(df_longitudinal_cleaned, "24m")
 ```
 
 
+```{r}
+library(dplyr)
+library(tidyr)
+library(igraph)
+library(stringr)
+library(RColorBrewer)
+
+# ============================================================
+# LONGITUDINAL EGO NETWORK FIGURE
+# rows = record_id / ego
+# columns = timepoint
+# ============================================================
+
+set.seed(123)
+
+timepoint_levels <- c("0m", "6m", "12m", "18m", "24m")
+
+df_plot <- df_longitudinal_cleaned %>%
+  mutate(
+    record_id = as.character(record_id),
+    contact_visit_id = as.character(contact_visit_id),
+    timepoint = factor(as.character(timepoint), levels = timepoint_levels),
+    hh_id_unified_ = as.character(hh_id_unified_),
+
+    # Because your contact_visit_id is:
+    # ctc_{ctc_idx}_tp_{timepoint}_idx_{record_id}
+    ctc_idx_plot = as.integer(str_extract(contact_visit_id, "(?<=ctc_)\\d+"))
+  )
 
 
+make_ego_graph <- function(data, ego_id, tp, type = c("basic", "intra_household")) {
+  
+  type <- match.arg(type)
+  
+  ego_data <- data %>%
+    filter(
+      record_id == ego_id,
+      as.character(timepoint) == tp
+    )
+  
+  if (nrow(ego_data) == 0) {
+    return(NULL)
+  }
+  
+  ego_edges <- ego_data %>%
+    transmute(
+      from = as.character(record_id),
+      to = as.character(contact_visit_id)
+    ) %>%
+    filter(!is.na(from), !is.na(to), from != to)
+  
+  if (type == "basic") {
+    edges <- ego_edges
+  }
+  
+  if (type == "intra_household") {
+    
+    hh_edges <- ego_data %>%
+      filter(
+        !is.na(hh_id_unified_),
+        hh_id_unified_ != "",
+        hh_id_unified_ != "NA",
+        !is.na(contact_visit_id)
+      ) %>%
+      group_by(record_id, hh_id_unified_) %>%
+      summarise(
+        pairs = list({
+          u <- unique(contact_visit_id)
+          
+          if (length(u) < 2) {
+            tibble::tibble(from = character(0), to = character(0))
+          } else {
+            m <- t(combn(u, 2))
+            tibble::tibble(from = m[, 1], to = m[, 2])
+          }
+        }),
+        .groups = "drop"
+      ) %>%
+      tidyr::unnest(pairs)
+    
+    edges <- bind_rows(ego_edges, hh_edges) %>%
+      distinct()
+  }
+  
+  if (nrow(edges) == 0) {
+    return(NULL)
+  }
+  
+  edges <- edges %>%
+    mutate(
+      a = pmin(from, to),
+      b = pmax(from, to)
+    ) %>%
+    distinct(a, b) %>%
+    transmute(from = a, to = b)
+  
+  g <- graph_from_data_frame(edges, directed = FALSE)
+  
+  V(g)$type <- ifelse(V(g)$name == ego_id, "index", "contact")
+  
+  # Bigger nodes for visibility in the grid
+  V(g)$size <- ifelse(V(g)$type == "index", 11, 8)
+  
+  g
+}
+
+
+make_ego_layout <- function(graph, ego_id = NULL) {
+  
+  set.seed(123)
+  
+  layout_mat <- layout_with_fr(graph)
+  rownames(layout_mat) <- V(graph)$name
+  
+  # Optional: recenter layout so ego is visually centered in each panel
+  if (!is.null(ego_id) && ego_id %in% rownames(layout_mat)) {
+    ego_xy <- layout_mat[ego_id, ]
+    layout_mat <- sweep(layout_mat, 2, ego_xy, FUN = "-")
+  }
+  
+  layout_mat
+}
+
+contact_age_labels <- c(
+  "0-2y", "3-5y", "7-11y", "12-15y", "16-20y",
+  "21-30y", "31-40y", "41-50y", "51-60y", ">60y"
+)
+
+contact_age_palette <- setNames(
+  RColorBrewer::brewer.pal(10, "Spectral"),
+  contact_age_labels
+)
+
+apply_contact_age_colors <- function(graph, data, ego_id, tp) {
+  
+  V(graph)$plot_color <- ifelse(V(graph)$type == "index", "red", "gray90")
+  
+  ego_data <- data %>%
+    filter(
+      record_id == ego_id,
+      as.character(timepoint) == tp
+    ) %>%
+    mutate(snml_vage_mrg = as.character(snml_vage_mrg)) %>%
+    distinct(contact_visit_id, snml_vage_mrg)
+  
+  age_lookup <- ego_data$snml_vage_mrg
+  names(age_lookup) <- ego_data$contact_visit_id
+  
+  age_label_lookup <- setNames(contact_age_labels, as.character(1:10))
+  
+  contacts <- which(V(graph)$type == "contact")
+  
+  for (v in contacts) {
+    node_name <- V(graph)$name[v]
+    age_val <- age_lookup[node_name]
+    age_lab <- age_label_lookup[as.character(age_val)]
+    
+    V(graph)$plot_color[v] <- ifelse(
+      is.na(age_lab),
+      "gray90",
+      unname(contact_age_palette[age_lab])
+    )
+  }
+  
+  V(graph)$plot_color[V(graph)$type == "index"] <- "red"
+  
+  graph
+}
+
+
+
+plot_ego_panel <- function(data, ego_id, tp, type = "basic", show_title = TRUE) {
+  
+  g <- make_ego_graph(data, ego_id, tp, type = type)
+  
+  if (is.null(g)) {
+    plot.new()
+    #box()
+    if (show_title) {
+      title(main = paste0("Record ID: ", ego_id, "; Timepoint: ", tp), cex.main = 1.25)
+    }
+    text(0.5, 0.5, "No data", cex = 2)
+    return(NULL)
+  }
+  
+  g <- apply_contact_age_colors(g, data, ego_id, tp)
+  layout_mat <- make_ego_layout(
+    graph = g,
+    ego_id = ego_id
+  )
+  
+  plot.igraph(
+    g,
+    layout = layout_mat,
+    vertex.color = V(g)$plot_color,
+    vertex.size = V(g)$size,
+    vertex.frame.color = "gray30",
+    vertex.frame.width = 0.7,
+    vertex.label = NA,
+    edge.color = "gray45",
+    edge.width = 0.8,
+    main = if (show_title) paste0("Record ID: ", ego_id, "; Timepoint: ", tp) else "",
+    margin = 0.05
+  )
+}
+
+
+
+ego_ids <- df_plot %>%
+  distinct(record_id) %>%
+  arrange(as.numeric(record_id)) %>%
+  pull(record_id)
+
+timepoints_to_plot <- c("0m", "6m", "12m", "18m", "24m")
+
+row_height <- 3
+
+pdf(
+  file = "longitudinal_ego_network_grid_large_nodes.pdf",
+  width = 22,
+  height = max(10, length(ego_ids) * row_height)
+)
+
+par(
+  mfrow = c(length(ego_ids), length(timepoints_to_plot)),
+  mar = c(0.2, 0.2, 1.1, 0.2),
+  oma = c(1, 1, 3, 1)
+)
+
+set.seed(123)
+
+for (ego in ego_ids) {
+  for (tp in timepoints_to_plot) {
+    plot_ego_panel(
+      data = df_plot,
+      ego_id = ego,
+      tp = tp,
+      type = "basic",
+      show_title = TRUE
+    )
+  }
+}
+
+mtext(
+  "Longitudinal Ego Networks by Index and Timepoint",
+  outer = TRUE,
+  side = 3,
+  line = 1,
+  cex = 1.5,
+  font = 2
+)
+
+dev.off()
+```
+
+#### This code saves the PDF to your files!
 
 
 
