@@ -1,0 +1,912 @@
+---
+title: "CFAR Analysis"
+author: "Max Schultz"
+date: "2026-06-29"
+output: html_document
+---
+
+# **CFAR Analysis Code** 
+
+### **EDA and Preprocessing** 
+
+```{r}
+library(haven)
+#setwd("/Users/maxschultz/Desktop/CFAR Social Network Project")
+data <- read_dta("CFAR SN 03DEC2025.dta")
+cat("Data Dimensions:",dim(data),"\n") 
+cat("Number of Contacts:", nrow(data))
+head(data)
+```
+
+```{r clean-contact-summary-table, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(gt)
+
+contact_data <- data
+
+# ------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------
+
+to_num <- function(x) {
+  suppressWarnings(as.numeric(as.character(x)))
+}
+
+summarize_binary <- function(data, var, label, group) {
+  x <- to_num(data[[var]])
+  x_binary <- ifelse(is.na(x), NA, ifelse(x == 1, 1, 0))
+  
+  n_total <- length(x_binary)
+  n_nonmiss <- sum(!is.na(x_binary))
+  n_missing <- sum(is.na(x_binary))
+  n_yes <- sum(x_binary == 1, na.rm = TRUE)
+  pct_yes <- round(100 * n_yes / n_nonmiss, 1)
+  
+  data.frame(
+    Section = group,
+    Variable = label,
+    N = n_nonmiss,
+    Missing = n_missing,
+    Mean = round(mean(x_binary, na.rm = TRUE), 2),
+    SD = round(sd(x_binary, na.rm = TRUE), 2),
+    Median = round(median(x_binary, na.rm = TRUE), 2),
+    Q1 = round(quantile(x_binary, 0.25, na.rm = TRUE), 2),
+    Q3 = round(quantile(x_binary, 0.75, na.rm = TRUE), 2),
+    Min = round(min(x_binary, na.rm = TRUE), 2),
+    Max = round(max(x_binary, na.rm = TRUE), 2),
+    Interpretation = paste0(n_yes, " yes (", pct_yes, "%)")
+  )
+}
+
+summarize_numeric <- function(data, var, label, group) {
+  x <- to_num(data[[var]])
+  
+  n_nonmiss <- sum(!is.na(x))
+  n_missing <- sum(is.na(x))
+  
+  data.frame(
+    Section = group,
+    Variable = label,
+    N = n_nonmiss,
+    Missing = n_missing,
+    Mean = round(mean(x, na.rm = TRUE), 2),
+    SD = round(sd(x, na.rm = TRUE), 2),
+    Median = round(median(x, na.rm = TRUE), 2),
+    Q1 = round(quantile(x, 0.25, na.rm = TRUE), 2),
+    Q3 = round(quantile(x, 0.75, na.rm = TRUE), 2),
+    Min = round(min(x, na.rm = TRUE), 2),
+    Max = round(max(x, na.rm = TRUE), 2),
+    Interpretation = ""
+  )
+}
+
+summarize_categorical <- function(data, var, label, group) {
+  x <- data[[var]]
+  tab <- table(x, useNA = "ifany")
+  pct <- round(prop.table(tab) * 100, 1)
+  
+  most_common <- names(tab)[which.max(tab)]
+  most_common_n <- max(tab)
+  most_common_pct <- pct[which.max(tab)]
+  
+  data.frame(
+    Section = group,
+    Variable = label,
+    N = length(x),
+    Missing = sum(is.na(x)),
+    Mean = NA,
+    SD = NA,
+    Median = NA,
+    Q1 = NA,
+    Q3 = NA,
+    Min = NA,
+    Max = NA,
+    Interpretation = paste0(
+      "Most common: ", most_common,
+      " (", most_common_n, ", ", most_common_pct, "%)"
+    )
+  )
+}
+
+# ------------------------------------------------------------
+# Main clean summary table
+# ------------------------------------------------------------
+
+contact_summary_clean <- bind_rows(
+  
+  data.frame(
+    Section = "Identifier",
+    Variable = "Contact ID",
+    N = nrow(contact_data),
+    Missing = sum(is.na(contact_data$contact_id)),
+    Mean = NA,
+    SD = NA,
+    Median = NA,
+    Q1 = NA,
+    Q3 = NA,
+    Min = NA,
+    Max = NA,
+    Interpretation = paste0(n_distinct(contact_data$contact_id), " unique contacts")
+  ),
+  
+  summarize_numeric(
+    contact_data, "snml_vage_mrg",
+    "Contact age group",
+    "Demographics"
+  ),
+  
+  summarize_categorical(
+    contact_data, "snml_sex_mrg",
+    "Contact sex",
+    "Demographics"
+  ),
+  
+  summarize_categorical(
+    contact_data, "snml_relate_mrg",
+    "Relationship to index child",
+    "Demographics"
+  ),
+  
+  summarize_binary(
+    contact_data, "pcare_mrg",
+    "Primary caregiver",
+    "Household / caregiving"
+  ),
+  
+  summarize_categorical(
+    contact_data, "hh_id_unified_",
+    "Household ID",
+    "Household / caregiving"
+  ),
+  
+  summarize_binary(
+    contact_data, "lived_mrg",
+    "Lived with index child",
+    "Contact type"
+  ),
+  
+  summarize_binary(
+    contact_data, "stayed_mrg",
+    "Stayed with index child",
+    "Contact type"
+  ),
+  
+  summarize_binary(
+    contact_data, "visited_mrg",
+    "Visited index child",
+    "Contact type"
+  ),
+  
+  summarize_binary(
+    contact_data, "occas_mrg",
+    "Occasional contact",
+    "Contact type"
+  ),
+  
+  summarize_binary(
+    contact_data, "elswe_mrg",
+    "Elsewhere-only contact",
+    "Contact type"
+  ),
+  
+  summarize_binary(
+    contact_data, "room_mrg",
+    "Same room",
+    "Other contact information"
+  ),
+  
+  summarize_binary(
+    contact_data, "bed_mrg",
+    "Same bed",
+    "Other contact information"
+  ),
+  
+  summarize_binary(
+    contact_data, "tb_dx_mrg",
+    "Previous TB",
+    "TB history / symptoms"
+  ),
+  
+  summarize_binary(
+    contact_data, "wloss_mrg",
+    "Weight loss",
+    "TB history / symptoms"
+  ),
+  
+  summarize_binary(
+    contact_data, "cough_mrg",
+    "Cough",
+    "TB history / symptoms"
+  ),
+  
+  summarize_binary(
+    contact_data, "smoke_mrg",
+    "Smoking",
+    "TB risk elements"
+  ),
+  
+  summarize_binary(
+    contact_data, "drug_mrg",
+    "Drug use",
+    "TB risk elements"
+  )
+)
+
+# ------------------------------------------------------------
+# Pretty GT table
+# ------------------------------------------------------------
+
+contact_summary_clean %>%
+  gt(groupname_col = "Section") %>%
+  tab_header(
+    title = md("**Contact-Level Summary Statistics**"),
+    subtitle = "Summary of contact demographics, household information, TB history, symptoms, and risk factors"
+  ) %>%
+  cols_label(
+    Variable = "Variable",
+    N = "N",
+    Missing = "Missing",
+    Mean = "Mean",
+    SD = "SD",
+    Median = "Median",
+    Q1 = "Q1",
+    Q3 = "Q3",
+    Min = "Min",
+    Max = "Max",
+    Interpretation = "Readable summary"
+  ) %>%
+  fmt_number(
+    columns = c(Mean, SD, Median, Q1, Q3, Min, Max),
+    decimals = 2
+  ) %>%
+  sub_missing(
+    columns = everything(),
+    missing_text = ""
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  ) %>%
+  tab_options(
+    table.font.size = px(13),
+    data_row.padding = px(6),
+    heading.title.font.size = px(18),
+    heading.subtitle.font.size = px(12),
+    column_labels.font.weight = "bold",
+    row_group.font.weight = "bold",
+    table.width = pct(100)
+  )
+```
+
+```{r}
+library(dplyr)
+contact_data <- data %>%
+    group_by(record_id) %>%
+    summarise(num_contacts = n_distinct(contact_id) )
+sum(contact_data$num_contacts)
+```
+
+
+```{r}
+names(data)
+unique(data$pcare_mrg)
+length(unique(data$record_id))
+```
+
+
+```{r}
+library(dplyr)
+data$enrol_age_yrs_mrg = floor(data$enrol_age_mrg/365.25)
+
+# data is in long format so need to avoid duplicates
+index_data <- data %>% # can continue to add to this for index data 
+    distinct(record_id, enrol_age_yrs_mrg)%>%
+    count(enrol_age_yrs_mrg, name = "n_index")
+print(index_data)
+
+cat("Number of Index Cases:", sum(index_data$n_index))
+```
+
+
+```{r}
+# basic contact age
+contact_age_levels <- 1:10
+contact_age_labels <- c("0-2y", "3-5y", "7-11y", "12-15y", "16-20y", "21-30y", "31-40y", "41-50y", "51-60y", ">60y")
+
+contact_age <- function(data, levels = contact_age_levels, labels = contact_age_labels, na_label = "NA"){
+    factor_version = factor(data, levels = levels, labels = labels)
+    factor_version = addNA(factor_version)
+    lev = levels(factor_version)
+    lev[is.na(lev) | lev == "<NA>"] <- na_label
+    levels(factor_version) <- lev
+    factor_version
+}
+```
+
+
+### **Basic Plots - Histograms** 
+
+
+```{r}
+# basic contact age
+plot(contact_age(data$snml_vage_mrg),
+    main = "Contact Age Distribution",
+    ylab = "Count",
+    las = 2,
+    col = "lightblue")
+table(contact_age(data$snml_vage_mrg))
+
+
+
+### CONTACT AGE BY SEX
+plot(contact_age(data$snml_vage_mrg[which(data$snml_sex_mrg == 1)]),
+    main = "Contact Age by Sex (Male)",
+    ylab = "Count",
+    las = 2,
+    col = "lightblue"
+)
+table(contact_age(data$snml_vage_mrg[which(data$snml_sex_mrg == 1)]))
+
+
+plot(contact_age(data$snml_vage_mrg[which(data$snml_sex_mrg == 2)]),
+    main = "Contact Age by Sex (Female)",
+    ylab = "Count",
+    las = 2,
+    col = "lightpink"
+)
+table(contact_age(data$snml_vage_mrg[which(data$snml_sex_mrg == 2)]))
+
+
+
+### CONTACT AGE BY INDEX AGE 
+plot(contact_age(data$snml_vage_mrg[which(data$enrol_age_yrs_mrg == 0)]),
+    main = "Contact Age by 0yo Index",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$enrol_age_yrs_mrg == 0)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$enrol_age_yrs_mrg == 1)]),
+    main = "Contact Age by 1yo Index",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$enrol_age_yrs_mrg == 1)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$enrol_age_yrs_mrg == 2)]),
+    main = "Contact Age by 2yo Index",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$enrol_age_yrs_mrg == 2)]))
+
+
+
+### CONTACT AGE BY HIV EXPOSURE
+plot(contact_age(data$snml_vage_mrg[which(data$cherish_sn_study_group_mrg == 1)]),
+    main = "Contact Age by Index HIV (CHEU)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$cherish_sn_study_group_mrg == 1)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$cherish_sn_study_group_mrg == 2)]),
+    main = "Contact Age by Index HIV (CHUU)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$cherish_sn_study_group_mrg == 2)]))
+
+
+### CONTACT AGE BY INDEX IGRA RESULT
+plot(contact_age(data$snml_vage_mrg[which(data$final_igra_result == 0)]),
+    main = "Contact Age by Index IGRA (Incomplete)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$final_igra_result == 0)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$final_igra_result == 1)]),
+    main = "Contact Age by Index IGRA (Unverified)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$final_igra_result == 1)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$final_igra_result == 2)]),
+    main = "Contact Age by Index IGRA (Complete)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$final_igra_result == 2)]))
+
+plot(contact_age(data$snml_vage_mrg[which(is.na(data$final_igra_result))]),
+    main = "Contact Age by Index IGRA (NA)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(is.na(data$final_igra_result))]))
+
+
+### CONTACT AGE BY TB SYMPTOM 
+
+# weight loss
+plot(contact_age(data$snml_vage_mrg[which(data$wloss_mrg== 1)]),
+    main = "Contact Age by Weight Loss (Yes)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$wloss_mrg == 1)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$wloss_mrg== 2)]),
+    main = "Contact Age by Weight Loss (No)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$wloss_mrg == 2)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$wloss_mrg== 3)]),
+    main = "Contact Age by Weight Loss (Don't Know)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$wloss_mrg == 3)]))
+
+plot(contact_age(data$snml_vage_mrg[which(is.na(data$wloss_mrg))]),
+    main = "Contact Age by Weight Loss (NA)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(is.na(data$wloss_mrg))]))
+
+# cough 
+plot(contact_age(data$snml_vage_mrg[which(data$cough_mrg== 1)]),
+    main = "Contact Age by Cough (Yes)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$cough_mrg == 1)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$cough_mrg== 2)]),
+    main = "Contact Age by Cough (No)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$cough_mrg == 2)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$cough_mrg== 3)]),
+    main = "Contact Age by cough (Don't Know)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$cough_mrg == 3)]))
+
+plot(contact_age(data$snml_vage_mrg[which(is.na(data$cough_mrg))]),
+    main = "Contact Age by Cough (NA)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(is.na(data$cough_mrg))]))
+
+
+
+### CONTACT AGE BY TB HISTORY 
+plot(contact_age(data$snml_vage_mrg[which(data$tb_dx_mrg == 1)]),
+    main = "Contact Age by TB History (Yes)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$tb_dx_mrg == 1)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$tb_dx_mrg == 2)]),
+    main = "Contact Age by TB History (No)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$tb_dx_mrg == 2)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$tb_dx_mrg == 3)]),
+    main = "Contact Age by TB History (Don't Know)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$tb_dx_mrg == 3)]))
+
+plot(contact_age(data$snml_vage_mrg[which(is.na(data$tb_dx_mrg))]),
+    main = "Contact Age by TB History (NA)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(is.na(data$tb_dx_mrg))]))
+
+
+
+### CONTACT AGE BY TB RISK FACTOR 
+
+# smoking 
+plot(contact_age(data$snml_vage_mrg[which(data$smoke_mrg == 1)]),
+    main = "Contact Age by Smoking (Yes)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$smoke_mrg == 1)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$smoke_mrg == 2)]),
+    main = "Contact Age by Smoking (No)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$smoke_mrg == 2)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$smoke_mrg == 3)]),
+    main = "Contact Age by Smoking (Don't Know)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$smoke_mrg == 3)]))
+
+plot(contact_age(data$snml_vage_mrg[which(is.na(data$smoke_mrg))]),
+    main = "Contact Age by Smoking (NA)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(is.na(data$smoke_mrg))]))
+
+
+
+# drugs
+plot(contact_age(data$snml_vage_mrg[which(data$drug_mrg == 1)]),
+    main = "Contact Age by Drug Use (Yes)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$drug_mrg == 1)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$drug_mrg == 2)]),
+    main = "Contact Age by Drug Use (No)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$drug_mrg == 2)]))
+
+plot(contact_age(data$snml_vage_mrg[which(data$drug_mrg == 3)]),
+    main = "Contact Age by Drug Use (Don't Know)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(data$drug_mrg == 3)]))
+
+plot(contact_age(data$snml_vage_mrg[which(is.na(data$drug_mrg))]),
+    main = "Contact Age by Drug Use (NA)",
+    ylab = "Count",
+    las = 2
+)
+table(contact_age(data$snml_vage_mrg[which(is.na(data$drug_mrg))]))
+
+```
+
+
+### **Basic Plots - Violin Plots** 
+
+```{r}
+library(vioplot)
+violin_contact_age <- function(x, main, col = "lightgray") {
+  x <- x[!is.na(x)]                 
+  vioplot(x, main = main, col = col, yaxt = "n")
+  axis(2, at = contact_age_levels, labels = contact_age_labels, las = 2)
+}
+```
+
+```{r}
+violin_contact_age(data$snml_vage_mrg, "Contact Age Distribution", col = 'lightblue')
+
+violin_contact_age(data$snml_vage_mrg[data$snml_sex_mrg == 1], "Contact Age By Sex (Male)", col = "lightblue")
+violin_contact_age(data$snml_vage_mrg[data$snml_sex_mrg == 2], "Contact Age by Sex (Female)", col = "lightpink")
+
+violin_contact_age(data$snml_vage_mrg[data$enrol_age_yrs_mrg == 0], "Contact Age by 0yo Index")
+violin_contact_age(data$snml_vage_mrg[data$enrol_age_yrs_mrg == 1], "Contact Age by 1yo Index")
+violin_contact_age(data$snml_vage_mrg[data$enrol_age_yrs_mrg == 2], "Contact Age by 2yo Index")
+
+violin_contact_age(data$snml_vage_mrg[data$cherish_sn_study_group_mrg == 1], "Contact Age by Index HIV (CHEU)")
+violin_contact_age(data$snml_vage_mrg[data$cherish_sn_study_group_mrg == 2], "Contact Age by Index HIV (CHUU)")
+
+violin_contact_age(data$snml_vage_mrg[data$final_igra_result == 0], "Contact Age by Index IGRA (Incomplete)")
+violin_contact_age(data$snml_vage_mrg[data$final_igra_result == 1], "Contact Age by Index IGRA (Unverified)")
+violin_contact_age(data$snml_vage_mrg[data$final_igra_result == 2], "Contact Age by Index IGRA (Complete)")
+violin_contact_age(data$snml_vage_mrg[is.na(data$final_igra_result)], "Contact Age by Index IGRA (NA)")
+
+violin_contact_age(data$snml_vage_mrg[data$wloss_mrg == 1], "Contact Age by Weight Loss (Yes)")
+violin_contact_age(data$snml_vage_mrg[data$wloss_mrg == 2], "Contact Age by Weight Loss (No)")
+violin_contact_age(data$snml_vage_mrg[data$wloss_mrg == 3], "Contact Age by Weight Loss (Don't Know)")
+violin_contact_age(data$snml_vage_mrg[is.na(data$wloss_mrg)], "Contact Age by Weight Loss (NA)")
+
+violin_contact_age(data$snml_vage_mrg[data$cough_mrg == 1], "Contact Age by Cough (Yes)")
+violin_contact_age(data$snml_vage_mrg[data$cough_mrg == 2], "Contact Age by Cough (No)")
+violin_contact_age(data$snml_vage_mrg[data$cough_mrg == 3], "Contact Age by Cough (Don't Know)")
+violin_contact_age(data$snml_vage_mrg[is.na(data$cough_mrg)], "Contact Age by Cough (NA)")
+
+violin_contact_age(data$snml_vage_mrg[data$smoke_mrg == 1], "Contact Age by Smoking (Yes)")
+violin_contact_age(data$snml_vage_mrg[data$smoke_mrg == 2], "Contact Age by Smoking (No)")
+violin_contact_age(data$snml_vage_mrg[data$smoke_mrg == 3], "Contact Age by Smoking (Don't Know)")
+violin_contact_age(data$snml_vage_mrg[is.na(data$smoke_mrg)], "Contact Age by Smoking (NA)")
+
+violin_contact_age(data$snml_vage_mrg[data$drug_mrg == 1], "Contact Age by Drug Use (Yes)")
+violin_contact_age(data$snml_vage_mrg[data$drug_mrg == 2], "Contact Age by Drug Use (No)")
+violin_contact_age(data$snml_vage_mrg[data$drug_mrg == 3], "Contact Age by Drug Use (Don't Know)")
+violin_contact_age(data$snml_vage_mrg[is.na(data$drug_mrg)], "Contact Age by Drug Use (NA)")
+```
+
+
+
+### **Statistical Tests**
+
+**Statistical tests of network differences between cHEU and cHUU**
+
+- Differences in average/median network size (ttest or Wilcoxon)
+- Differences in average/median network density (ttest or Wilcoxon)
+- Differences in proportion of adult men [network heterogeneity] (ttest or Wilcoxon)
+- Differences in proportion with TB history [network heterogeneity] (ttest or Wilcoxon)
+    - Within Household A
+    - Outside of Household A
+
+
+```{r}
+household_density <- function(hh){ # simpson concentration index (SCI) 
+    hh <- hh[!is.na(hh)]
+    n = length(hh)
+    if (n<2){
+        return(NA_real_)
+    }
+    hh_table = table(hh)
+    p = as.numeric(hh_table) / sum(hh_table) 
+    sum(p^2) # probability that any two randomly sampled points in the ego are from the same household
+}
+
+df <- data %>%
+    mutate(group = case_when(
+        cherish_sn_study_group_mrg == 1 ~ "CHEU",
+        cherish_sn_study_group_mrg == 2 ~ "CHUU",
+        TRUE ~ NA_character_
+    ),
+    adult_male = (snml_sex_mrg == 1) & (snml_vage_mrg %in% c(6,7)),
+    previos_tb = (tb_dx_mrg == 1)
+    )
+# head(df)
+
+ego_stats_df <- df %>%
+    filter(!is.na(group)) %>%
+    group_by(record_id, group) %>%
+    summarise(
+        # this is the density metrics and the proportion of adult males and previous tb 
+        n_contacts = n_distinct(contact_id),
+        density = household_density(hh_id_unified_),
+        prop_adult_men = mean(adult_male, na.rm = T),
+        prop_prev_tb = mean(previos_tb, na.rm = T),
+
+        # in household A
+        n_a = n_distinct(contact_id[hh_id_unified_ == 1]),
+        prop_adult_men_a = mean(adult_male[hh_id_unified_ == 1], na.rm = T),
+        prop_prev_tb_a = mean(previos_tb[hh_id_unified_ == 1], na.rm = T),
+
+        # not in household A
+        n_nota = n_distinct(contact_id[!is.na(hh_id_unified_) & hh_id_unified_ != 1]),
+        density_nota = household_density(hh_id_unified_[!is.na(hh_id_unified_) & hh_id_unified_ != 1]),
+        prop_adult_men_nota = mean(adult_male[!is.na(hh_id_unified_) & hh_id_unified_ != 1], na.rm = T),
+        prop_prev_tb_nota = mean(previos_tb[!is.na(hh_id_unified_) & hh_id_unified_ != 1], na.rm = T),
+        .groups = "drop"
+    )
+
+head(ego_stats_df)
+dim(ego_stats_df)
+```
+
+
+
+```{r}
+tests <- c("n_contacts","density","prop_adult_men","prop_prev_tb",
+           "n_a","prop_adult_men_a","prop_prev_tb_a",
+           "n_nota","density_nota","prop_adult_men_nota","prop_prev_tb_nota")
+
+results = do.call(rbind, lapply(tests, function(v){
+    wt <- wilcox.test(ego_stats_df[[v]] ~ ego_stats_df$group,
+                    exact = FALSE, conf.int = TRUE)
+    data.frame(
+        metric = v,
+        W = unname(wt$statistic),
+        p = wt$p.value,
+        HL = if (!is.null(wt$estimate)) unname(wt$estimate) else NA_real_,
+        CI_low = if (!is.null(wt$conf.int)) unname(wt$conf.int[1]) else NA_real_,
+        CI_high= if (!is.null(wt$conf.int)) unname(wt$conf.int[2]) else NA_real_,
+        stringsAsFactors = FALSE
+        )
+}))
+
+results
+```
+
+
+**Statistical tests of network differences between 0yo, 1yo, and 2yo**
+
+- Differences in average/median network size (ttest or Wilcoxon)
+- Differences in average/median network density (ttest or Wilcoxon)
+- Differences in proportion of adult men [network heterogeneity] (ttest or Wilcoxon)
+- Differences in proportion with TB history [network heterogeneity] (ttest or Wilcoxon)
+    - Within Household A
+    - Outside of Household A
+
+
+```{r}
+ego_age <- df %>%
+  distinct(record_id, enrol_age_yrs_mrg) %>%
+  filter(enrol_age_yrs_mrg %in% c(0,1,2)) %>%
+  mutate(index_age = factor(enrol_age_yrs_mrg, levels = c(0,1,2),
+                            labels = c("0yo","1yo","2yo")))
+
+ego_stats_age <- ego_stats_df %>%
+  left_join(ego_age %>% dplyr::select(record_id, index_age), by = "record_id") %>%
+  filter(!is.na(index_age))
+
+vars <- c("n_contacts","density","prop_adult_men","prop_prev_tb",
+          "n_a","prop_adult_men_a","prop_prev_tb_a",
+          "n_nota","density_nota","prop_adult_men_nota","prop_prev_tb_nota")
+
+res_kw <- do.call(rbind, lapply(vars, function(v){
+  kt <- kruskal.test(ego_stats_age[[v]] ~ ego_stats_age$index_age)  # index_age must be 0yo/1yo/2yo factor
+  data.frame(
+    metric = v,
+    chi_sq = unname(kt$statistic),
+    df = unname(kt$parameter),
+    p = kt$p.value,
+    stringsAsFactors = FALSE
+  )
+}))
+res_kw
+```
+
+
+
+**Statistical tests of network differences between cHEU and cHUU, adjusted for age**
+- Differences in average/median network size (adjusted negative binomial regression)
+- Differences in average/median network density (adjusted linear regression)
+- Differences in proportion of adult men [network heterogeneity] (adjusted linear regression)
+- Differences in proportion with TB history [network heterogeneity] (adjusted linear regression)
+    - Within Household A
+    - Outside of Household A
+
+
+```{r}
+# differences in median network size 
+library(MASS)
+ego_stats_age$group <- relevel(factor(ego_stats_age$group), ref = "CHUU")
+m_size <- glm.nb(n_contacts ~ group + index_age, data = ego_stats_age)
+summary(m_size)
+```
+
+
+
+
+
+```{r}
+exp(coef(m_size)["groupCHEU"])        
+exp(confint(m_size)["groupCHEU"])   
+```
+
+
+
+
+
+```{r}
+m_density <- lm(density ~ group + index_age, data = ego_stats_age)
+summary(m_density)
+```
+
+
+
+
+
+```{r}
+coef(summary(m_density))["groupCHEU", ]
+confint(m_density)["groupCHEU", ]
+```
+
+
+
+
+
+```{r}
+m_am <- lm(prop_adult_men ~ group + index_age, data = ego_stats_age)
+summary(m_am)
+coef(summary(m_am))["groupCHEU", ]
+confint(m_am)["groupCHEU", ]
+```
+
+
+
+```{r}
+m_tb <- lm(prop_prev_tb ~ group + index_age, data = ego_stats_age)
+summary(m_tb)
+coef(summary(m_tb))["groupCHEU", ]
+confint(m_tb)["groupCHEU", ]
+```
+
+
+
+
+
+
+```{r}
+m_tb_a <- lm(prop_prev_tb_a ~ group + index_age, data = ego_stats_age)
+summary(m_tb_a)
+coef(summary(m_tb_a))["groupCHEU", ]
+confint(m_tb_a)["groupCHEU", ]
+```
+
+
+
+
+
+```{r}
+m_tb_out <- lm(prop_prev_tb_nota ~ group + index_age, data = ego_stats_age)
+summary(m_tb_out)
+coef(summary(m_tb_out))["groupCHEU", ]
+confint(m_tb_out)["groupCHEU", ]
+```
+
+
+
+### **Wilcox Boxplots**
+
+```{r}
+pkgs <- c("ggpubr")
+to_install <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(to_install)) install.packages(to_install)
+library(ggpubr)
+
+# inputs you already have:
+# ego_stats_age (one row per index) with columns index_age + vars
+# res_kw with columns metric + p
+
+vars <- c("n_contacts","density","prop_adult_men","prop_prev_tb",
+          "n_a","prop_adult_men_a","prop_prev_tb_a",
+          "n_nota","density_nota","prop_adult_men_nota","prop_prev_tb_nota")
+
+ego_stats_age$index_age <- factor(ego_stats_age$index_age, levels = c("0yo","1yo","2yo"))
+comps <- list(c("0yo","1yo"), c("0yo","2yo"), c("1yo","2yo"))
+
+make_one <- function(v){
+  kw_p <- res_kw$p[match(v, res_kw$metric)]  # pull KW p from your dataframe
+
+  ggboxplot(
+    ego_stats_age, x = "index_age", y = v,
+    add = "jitter", add.params = list(alpha = 0.25, size = 1),
+    outlier.alpha = 0.25
+  ) +
+    labs(
+      title = v,
+      subtitle = paste0("KW p=", format.pval(kw_p, digits = 2)),
+      x = NULL, y = NULL
+    ) +
+    stat_compare_means(
+      comparisons = comps,
+      method = "wilcox.test",
+      label = "p.signif",                 # asterisks
+      method.args = list(exact = FALSE),  # avoids ties warnings
+      hide.ns = T,                     # change to FALSE if you want ns shown
+      tip.length = 0.01,
+      size = 4,
+      vjust = 1
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title = element_text(size = 11, face = "bold"),
+      plot.subtitle = element_text(size = 9)
+    )
+}
+
+plots <- lapply(vars, make_one)
+
+# 4 x 3 grid
+G <- ggarrange(plotlist = plots, ncol = 4, nrow = 3, align = "hv")
+G
+```
+
